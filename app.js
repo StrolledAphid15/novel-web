@@ -4,6 +4,7 @@ const GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const SYNC_FILE = "yejian-library-backup.json";
 const CLOUD_BOOK_MAX_AGE = 10 * 24 * 60 * 60 * 1000;
 const GOOGLE_TOKEN_KEY = "yejian-google-access-token";
+const ACTIVE_BOOK_KEY = "yejian-active-book-id";
 
 const sampleBook = {
   id: "sample-mist-port",
@@ -38,6 +39,7 @@ let syncInProgress = false;
 let syncRunId = 0;
 let currentSyncAutomatic = false;
 let rejectPendingTokenRequest = null;
+let lastAutoSyncAttempt = 0;
 
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -294,6 +296,7 @@ function setFontSize(size) {
 async function selectBook(id, { sync = true } = {}) {
   saveTextProgress(true);
   activeBookId = id;
+  localStorage.setItem(ACTIVE_BOOK_KEY, id);
   const book = activeBook();
   book.updatedAt = Date.now();
   book.lastOpenedAt = book.updatedAt;
@@ -480,9 +483,23 @@ function loadGoogleIdentity() {
     if (!window.google?.accounts?.oauth2) return;
     clearInterval(interval);
     const clientId = localStorage.getItem("yejian-google-client-id");
-    if (clientId) syncToDrive({ automatic: true });
+    if (clientId) resumeGoogleSync();
   }, 150);
   setTimeout(() => clearInterval(interval), 15000);
+}
+
+function resumeGoogleSync() {
+  if (document.visibilityState === "hidden") return;
+  if (!cachedGoogleToken()) {
+    if (localStorage.getItem("yejian-google-client-id")) {
+      $("#sync-feedback").textContent = "请点击“连接并同步”重新授权";
+      $("#local-status").textContent = "云盘待重新连接";
+    }
+    return;
+  }
+  if (Date.now() - lastAutoSyncAttempt < 5000) return;
+  lastAutoSyncAttempt = Date.now();
+  syncToDrive({ automatic: true });
 }
 
 function moveChapter(offset) {
@@ -516,7 +533,8 @@ function requestGoogleToken(clientId, prompt) {
         return;
       }
       const token = { value: response.access_token, expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000 };
-      sessionStorage.setItem(GOOGLE_TOKEN_KEY, JSON.stringify(token));
+      localStorage.setItem(GOOGLE_TOKEN_KEY, JSON.stringify(token));
+      sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
       finish(resolve)(token.value);
     } });
     if (prompt) googleTokenClient.requestAccessToken({ prompt });
@@ -526,9 +544,15 @@ function requestGoogleToken(clientId, prompt) {
 
 function cachedGoogleToken() {
   try {
-    const token = JSON.parse(sessionStorage.getItem(GOOGLE_TOKEN_KEY) || "null");
-    if (token?.value && token.expiresAt > Date.now() + 30000) return token.value;
+    const persistedToken = localStorage.getItem(GOOGLE_TOKEN_KEY);
+    const token = JSON.parse(persistedToken || sessionStorage.getItem(GOOGLE_TOKEN_KEY) || "null");
+    if (token?.value && token.expiresAt > Date.now() + 30000) {
+      if (!persistedToken) localStorage.setItem(GOOGLE_TOKEN_KEY, JSON.stringify(token));
+      sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
+      return token.value;
+    }
   } catch {}
+  localStorage.removeItem(GOOGLE_TOKEN_KEY);
   sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
   return null;
 }
@@ -541,7 +565,10 @@ function recentForCloud(book, now = Date.now()) {
 async function driveRequest(path, options = {}) {
   const response = await fetch(`https://www.googleapis.com/drive/v3/${path}`, { ...options, headers: { Authorization: `Bearer ${accessToken}`, ...options.headers } });
   if (!response.ok) {
-    if (response.status === 401) sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
+    if (response.status === 401) {
+      localStorage.removeItem(GOOGLE_TOKEN_KEY);
+      sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
+    }
     throw new Error(`Google Drive 请求失败 (${response.status})`);
   }
   return response.status === 204 ? null : response.json();
@@ -628,7 +655,14 @@ async function syncToDrive({ automatic = false } = {}) {
 }
 
 function bindEvents() {
-  window.addEventListener("pagehide", () => saveTextProgress(true));
+  const persistReadingState = () => saveTextProgress(true);
+  window.addEventListener("pagehide", persistReadingState);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") persistReadingState();
+    else resumeGoogleSync();
+  });
+  window.addEventListener("pageshow", resumeGoogleSync);
+  window.addEventListener("online", resumeGoogleSync);
   $(".brand").addEventListener("click", (event) => {
     event.preventDefault();
     saveTextProgress(true);
@@ -684,7 +718,9 @@ async function init() {
     await saveBook(sampleBook);
     books = [sampleBook];
   }
-  activeBookId = books.find((book) => book.id === activeBookId)?.id || books[0].id;
+  const savedBookId = localStorage.getItem(ACTIVE_BOOK_KEY);
+  activeBookId = books.find((book) => book.id === savedBookId)?.id || books[0].id;
+  localStorage.setItem(ACTIVE_BOOK_KEY, activeBookId);
   const openedBook = books.find((book) => book.id === activeBookId);
   openedBook.lastOpenedAt = Date.now();
   await saveBook(openedBook);
