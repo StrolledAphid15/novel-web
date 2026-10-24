@@ -604,10 +604,12 @@ async function syncToDrive({ automatic = false } = {}) {
     $("#sync-feedback").textContent = `已同步 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
     $("#local-status").textContent = "已连接 Google Drive";
     renderShelf();
-    $("#settings-dialog").close();
-    setView("library");
-    renderCollection();
-    if (!automatic) notify("书架已同步到 Google Drive");
+    if (!automatic) {
+      $("#settings-dialog").close();
+      setView("library");
+      renderCollection();
+      notify("书架已同步到 Google Drive");
+    }
   } catch (error) {
     if (runId !== syncRunId) return;
     $("#sync-feedback").textContent = error.message;

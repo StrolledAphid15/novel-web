@@ -9,13 +9,16 @@
   --reader-ink: #373833;
   --reader-muted: #88897f;
   --reader-rule: #e9e8e0;
+  --app-height: 100vh;
 }
 
+@supports (height: 100dvh) { :root { --app-height: 100dvh; } }
+
 * { box-sizing: border-box; }
-body { min-width: 320px; height: 100vh; margin: 0; overflow: hidden; background: #f7f7f4; }
+body { min-width: 320px; height: var(--app-height); margin: 0; padding-top: env(safe-area-inset-top); overflow: hidden; background: #f7f7f4; }
 button, select, input { font-family: inherit; }
 button { cursor: pointer; }
-.app-shell { display: grid; grid-template-columns: 248px 1fr; height: 100vh; }
+.app-shell { display: grid; grid-template-columns: 248px 1fr; height: calc(var(--app-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
 
 .sidebar { display: flex; flex-direction: column; min-height: 0; padding: 27px 18px 14px; background: #f1f2ee; border-right: 1px solid #e6e8e2; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 9px; color: #242922; font-size: 17px; font-weight: 700; text-decoration: none; }
