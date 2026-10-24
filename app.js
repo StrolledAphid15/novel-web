@@ -2,6 +2,8 @@ const DB_NAME = "yejian-reader";
 const DB_VERSION = 1;
 const GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const SYNC_FILE = "yejian-library-backup.json";
+const CLOUD_BOOK_MAX_AGE = 10 * 24 * 60 * 60 * 1000;
+const GOOGLE_TOKEN_KEY = "yejian-google-access-token";
 
 const sampleBook = {
   id: "sample-mist-port",
@@ -32,6 +34,10 @@ let googleTokenClient = null;
 let accessToken = null;
 let toastTimer;
 let textProgressSaveTimer = null;
+let syncInProgress = false;
+let syncRunId = 0;
+let currentSyncAutomatic = false;
+let rejectPendingTokenRequest = null;
 
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -55,6 +61,15 @@ async function saveBook(book) {
   const db = await dbPromise;
   return new Promise((resolve, reject) => {
     const request = db.transaction("books", "readwrite").objectStore("books").put(book);
+    request.onsuccess = resolve;
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function deleteBook(id) {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const request = db.transaction("books", "readwrite").objectStore("books").delete(id);
     request.onsuccess = resolve;
     request.onerror = () => reject(request.error);
   });
@@ -112,9 +127,75 @@ function renderCollection() {
     const chapterCount = book.chapters?.length || 0;
     const percent = book.format === "text" ? chapterCount ? Math.round(((Number(book.progress) + 1) / chapterCount) * 100) : 0 : Math.round((Number(book.progress) || 0) * 100);
     const format = book.format === "epub" ? "EPUB" : book.title.match(/\.md$/i) ? "MD" : "TXT";
-    return `<button class="collection-card" data-book-id="${safeText(book.id)}"><span class="collection-cover"><span>${safeText(book.title.slice(0, 1))}</span><small>${format}</small></span><span class="collection-card-copy"><strong>${safeText(book.title)}</strong><span class="collection-author">${safeText(book.author || "未知作者")}</span><span class="collection-progress"><span><i style="width:${Math.min(100, percent)}%"></i></span><small>${percent}%</small></span></span></button>`;
+    return `<article class="collection-card"><button class="collection-open" data-book-id="${safeText(book.id)}" aria-label="阅读：${safeText(book.title)}"><span class="collection-cover"><span>${safeText(book.title.slice(0, 1))}</span><small>${format}</small></span><span class="collection-card-copy"><strong>${safeText(book.title)}</strong><span class="collection-author">${safeText(book.author || "未知作者")}</span><span class="collection-progress"><span><i style="width:${Math.min(100, percent)}%"></i></span><small>${percent}%</small></span></span></button><span class="collection-card-actions"><button class="text-button book-edit" data-book-id="${safeText(book.id)}">编辑</button><button class="text-button book-delete" data-book-id="${safeText(book.id)}">删除</button></span></article>`;
   }).join("");
-  $("#collection-grid").querySelectorAll("[data-book-id]").forEach((card) => card.addEventListener("click", () => selectBook(card.dataset.bookId)));
+  $("#collection-grid").querySelectorAll(".collection-open").forEach((button) => button.addEventListener("click", () => selectBook(button.dataset.bookId)));
+  $("#collection-grid").querySelectorAll(".book-edit").forEach((button) => button.addEventListener("click", () => openBookEditor(button.dataset.bookId)));
+  $("#collection-grid").querySelectorAll(".book-delete").forEach((button) => button.addEventListener("click", () => removeBook(button.dataset.bookId).catch((error) => notify(error.message))));
+}
+
+function openBookEditor(id) {
+  const book = books.find((item) => item.id === id);
+  if (!book) return;
+  $("#edit-book-id").value = book.id;
+  $("#edit-book-title").value = book.title;
+  $("#edit-book-author").value = book.author || "";
+  $("#replace-book-file").value = "";
+  $("#edit-book-dialog").showModal();
+}
+
+async function removeBook(id) {
+  const book = books.find((item) => item.id === id);
+  if (!book || !confirm(`删除《${book.title}》及其书籍文件和阅读进度？此操作无法撤销。`)) return;
+  if (id === activeBookId) saveTextProgress(true);
+  await deleteBook(id);
+  books = books.filter((item) => item.id !== id);
+  if (id === activeBookId) {
+    epubRendition?.destroy();
+    epubRendition = epubBook = null;
+    epubChapters = [];
+    activeBookId = books[0]?.id || sampleBook.id;
+    if (!books.length) {
+      await saveBook(sampleBook);
+      books = [sampleBook];
+    }
+    await selectBook(activeBookId);
+  }
+  renderShelf();
+  renderCollection();
+  notify("书籍已删除");
+}
+
+async function updateBook(event) {
+  event.preventDefault();
+  const id = $("#edit-book-id").value;
+  const book = books.find((item) => item.id === id);
+  if (!book) return;
+  const title = $("#edit-book-title").value.trim();
+  if (!title) { notify("书名不能为空"); return; }
+  const file = $("#replace-book-file").files[0];
+  let replacement = null;
+  if (file) {
+    if (/\.epub$/i.test(file.name)) replacement = { format: "epub", data: await file.arrayBuffer() };
+    else if (/\.(txt|md|markdown)$/i.test(file.name)) replacement = { format: "text", chapters: splitIntoChapters(await file.text()) };
+    else { notify("请选择 TXT、Markdown 或 EPUB 文件"); return; }
+    if (!replacement.chapters?.length && replacement.format === "text") { notify("文件中没有可导入的正文"); return; }
+  }
+  if (id === activeBookId) saveTextProgress(true);
+  book.title = title;
+  book.author = $("#edit-book-author").value.trim();
+  book.updatedAt = Date.now();
+  if (replacement) {
+    Object.assign(book, replacement, { progress: 0, scrollProgress: 0 });
+    delete book.cfi;
+  }
+  await saveBook(book);
+  books = await allBooks();
+  $("#edit-book-dialog").close();
+  renderShelf();
+  renderCollection();
+  if (id === activeBookId) await selectBook(id);
+  notify(replacement ? "书籍信息和文件已更新" : "书籍信息已更新");
 }
 
 function setView(view) {
@@ -210,16 +291,18 @@ function setFontSize(size) {
   if (epubRendition) epubRendition.themes.fontSize(`${fontSize}px`);
 }
 
-async function selectBook(id) {
+async function selectBook(id, { sync = true } = {}) {
   saveTextProgress(true);
   activeBookId = id;
   const book = activeBook();
   book.updatedAt = Date.now();
+  book.lastOpenedAt = book.updatedAt;
   await saveBook(book);
   renderShelf();
   setView("reader");
   if (book.format === "epub") {
     await showEpub(book);
+    if (sync) syncToDrive({ automatic: true });
     return;
   }
   if (epubRendition) epubRendition.destroy();
@@ -227,6 +310,7 @@ async function selectBook(id) {
   epubChapters = [];
   renderTextChapter(Number(book.progress) || 0, false);
   if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
+  if (sync) syncToDrive({ automatic: true });
 }
 
 function flattenToc(items, result = []) {
@@ -396,7 +480,7 @@ function loadGoogleIdentity() {
     if (!window.google?.accounts?.oauth2) return;
     clearInterval(interval);
     const clientId = localStorage.getItem("yejian-google-client-id");
-    if (clientId) googleTokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: GOOGLE_SCOPE, callback: () => {} });
+    if (clientId) syncToDrive({ automatic: true });
   }, 150);
   setTimeout(() => clearInterval(interval), 15000);
 }
@@ -413,27 +497,80 @@ function moveChapter(offset) {
   renderTextChapter(activeChapter + offset);
 }
 
-function requestGoogleToken(clientId) {
+function requestGoogleToken(clientId, prompt) {
   return new Promise((resolve, reject) => {
     if (!window.google?.accounts?.oauth2) return reject(new Error("Google 授权组件尚未加载，请刷新页面后重试"));
-    googleTokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: GOOGLE_SCOPE, callback: (response) => response.error ? reject(new Error(response.error_description || response.error)) : resolve(response.access_token) });
-    googleTokenClient.requestAccessToken({ prompt: "consent" });
+    const timeout = setTimeout(() => {
+      rejectPendingTokenRequest = null;
+      reject(new Error(prompt === "none" ? "无法静默连接 Google，请点击“连接并同步”重新授权" : "Google 授权超时，请重试"));
+    }, prompt === "none" ? 8000 : 120000);
+    const finish = (callback) => (value) => {
+      clearTimeout(timeout);
+      rejectPendingTokenRequest = null;
+      callback(value);
+    };
+    rejectPendingTokenRequest = finish(reject);
+    googleTokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: GOOGLE_SCOPE, callback: (response) => {
+      if (response.error) {
+        finish(reject)(new Error(response.error_description || response.error));
+        return;
+      }
+      const token = { value: response.access_token, expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000 };
+      sessionStorage.setItem(GOOGLE_TOKEN_KEY, JSON.stringify(token));
+      finish(resolve)(token.value);
+    } });
+    if (prompt) googleTokenClient.requestAccessToken({ prompt });
+    else googleTokenClient.requestAccessToken();
   });
+}
+
+function cachedGoogleToken() {
+  try {
+    const token = JSON.parse(sessionStorage.getItem(GOOGLE_TOKEN_KEY) || "null");
+    if (token?.value && token.expiresAt > Date.now() + 30000) return token.value;
+  } catch {}
+  sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
+  return null;
+}
+
+function recentForCloud(book, now = Date.now()) {
+  const lastOpened = Number(book.lastOpenedAt || book.updatedAt || book.addedAt || 0);
+  return lastOpened >= now - CLOUD_BOOK_MAX_AGE;
 }
 
 async function driveRequest(path, options = {}) {
   const response = await fetch(`https://www.googleapis.com/drive/v3/${path}`, { ...options, headers: { Authorization: `Bearer ${accessToken}`, ...options.headers } });
-  if (!response.ok) throw new Error(`Google Drive 请求失败 (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 401) sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
+    throw new Error(`Google Drive 请求失败 (${response.status})`);
+  }
   return response.status === 204 ? null : response.json();
 }
 
-async function syncToDrive() {
-  const clientId = $("#google-client-id").value.trim();
-  if (!clientId) { notify("请先填写 OAuth 网页客户端 ID"); return; }
+async function syncToDrive({ automatic = false } = {}) {
+  if (syncInProgress) {
+    if (automatic || !currentSyncAutomatic) return;
+    rejectPendingTokenRequest?.(new Error("自动连接已由手动连接接管"));
+  }
+  const clientId = (automatic ? localStorage.getItem("yejian-google-client-id") || "" : $("#google-client-id").value).trim();
+  if (!clientId) {
+    if (!automatic) notify("请先填写 OAuth 网页客户端 ID");
+    return;
+  }
+  const savedToken = cachedGoogleToken();
+  if (automatic && !savedToken) {
+    $("#sync-feedback").textContent = "请点击“连接并同步”完成授权";
+    $("#local-status").textContent = "等待 Google 授权";
+    return;
+  }
+  syncInProgress = true;
+  currentSyncAutomatic = automatic;
+  const runId = ++syncRunId;
   localStorage.setItem("yejian-google-client-id", clientId);
-  $("#sync-feedback").textContent = "正在授权…";
+  $("#sync-feedback").textContent = automatic ? "正在自动同步…" : "正在授权…";
   try {
-    accessToken = await requestGoogleToken(clientId);
+    accessToken = savedToken || await requestGoogleToken(clientId);
+    if (runId !== syncRunId) return;
     $("#sync-feedback").textContent = "正在同步书架…";
     const result = await driveRequest("files?spaces=appDataFolder&q=name%3D%27yejian-library-backup.json%27&fields=files(id,name)");
     const fileId = result.files?.[0]?.id;
@@ -442,15 +579,22 @@ async function syncToDrive() {
       if (!response.ok) throw new Error(`无法读取云端备份 (${response.status})`);
       const cloudBackup = decodeBackup(await response.text());
       if (!Array.isArray(cloudBackup.books)) throw new Error("云端备份文件格式不正确");
-      const merged = new Map(cloudBackup.books.map((book) => [book.id, book]));
-      for (const local of books) {
+      const now = Date.now();
+      const merged = new Map(cloudBackup.books.filter((book) => recentForCloud(book, now)).map((book) => [book.id, book]));
+      for (const local of books.filter((book) => recentForCloud(book, now))) {
         const cloud = merged.get(local.id);
         if (!cloud || (local.updatedAt || local.addedAt || 0) > (cloud.updatedAt || cloud.addedAt || 0)) merged.set(local.id, local);
       }
-      books = [...merged.values()];
+      const localById = new Map(books.map((book) => [book.id, book]));
+      for (const cloud of merged.values()) {
+        const local = localById.get(cloud.id);
+        if (!local || (cloud.updatedAt || cloud.addedAt || 0) > (local.updatedAt || local.addedAt || 0)) localById.set(cloud.id, cloud);
+      }
+      books = [...localById.values()];
       await replaceBooks(books);
     }
-    const payload = encodeBackup({ version: 1, exportedAt: new Date().toISOString(), books, settings: { fontSize, theme: activeTheme } });
+    const cloudBooks = books.filter((book) => recentForCloud(book));
+    const payload = encodeBackup({ version: 1, exportedAt: new Date().toISOString(), books: cloudBooks, settings: { fontSize, theme: activeTheme } });
     const fileMetadata = { name: SYNC_FILE, mimeType: "application/json", ...(!fileId ? { parents: ["appDataFolder"] } : {}) };
     const boundary = `yejian_${crypto.randomUUID()}`;
     const body = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(fileMetadata)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${boundary}--`], { type: `multipart/related; boundary=${boundary}` });
@@ -460,11 +604,24 @@ async function syncToDrive() {
     $("#sync-feedback").textContent = `已同步 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
     $("#local-status").textContent = "已连接 Google Drive";
     renderShelf();
-    if (books.some((book) => book.id === activeBookId)) await selectBook(activeBookId);
-    notify("书架已同步到 Google Drive");
+    $("#settings-dialog").close();
+    setView("library");
+    renderCollection();
+    if (!automatic) notify("书架已同步到 Google Drive");
   } catch (error) {
+    if (runId !== syncRunId) return;
     $("#sync-feedback").textContent = error.message;
-    notify(error.message);
+    if (automatic) {
+      $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
+    } else {
+      notify(error.message);
+    }
+  } finally {
+    if (runId === syncRunId) {
+      syncInProgress = false;
+      currentSyncAutomatic = false;
+      rejectPendingTokenRequest = null;
+    }
   }
 }
 
@@ -495,6 +652,9 @@ function bindEvents() {
   $("#collection-search").addEventListener("input", renderCollection);
   $("#collection-import").addEventListener("click", () => $("#file-input").click());
   $("#collection-empty-import").addEventListener("click", () => $("#file-input").click());
+  $("#edit-book-form").addEventListener("submit", (event) => updateBook(event).catch((error) => notify(error.message)));
+  $("#close-edit-book").addEventListener("click", () => $("#edit-book-dialog").close());
+  $("#cancel-edit-book").addEventListener("click", () => $("#edit-book-dialog").close());
   $("#clear-library").addEventListener("click", async () => {
     if (!confirm("清空此设备上的书架和阅读进度？此操作无法撤销。")) return;
     await replaceBooks([sampleBook]);
@@ -520,6 +680,9 @@ async function init() {
     books = [sampleBook];
   }
   activeBookId = books.find((book) => book.id === activeBookId)?.id || books[0].id;
+  const openedBook = books.find((book) => book.id === activeBookId);
+  openedBook.lastOpenedAt = Date.now();
+  await saveBook(openedBook);
   renderShelf();
   setTheme(activeTheme);
   setFontSize(fontSize);

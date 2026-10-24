@@ -76,10 +76,24 @@
       <form method="dialog" class="dialog-head"><div><span class="dialog-eyebrow">偏好设置</span><h2>阅读与同步</h2></div><button class="icon-button" aria-label="关闭">×</button></form>
       <div class="dialog-body">
         <section class="settings-section"><div class="settings-section-title">本地备份</div><p>导出书架、阅读进度和设置，保存为一个 JSON 文件。</p><div class="settings-actions"><button class="outline-button" id="export-backup">导出备份</button><button class="outline-button" id="import-backup">导入备份</button></div></section>
-        <section class="settings-section"><div class="settings-section-title">Google Drive</div><p>使用 Google 官方授权，将书架备份到仅此应用可见的存储空间。</p><label class="field-label" for="google-client-id">OAuth 网页客户端 ID</label><input class="text-field" id="google-client-id" placeholder="例如 1234567890-abc.apps.googleusercontent.com" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="google-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">需要在 Google Cloud 中启用 Drive API 并配置 OAuth 网页客户端。</div></section>
+        <section class="settings-section"><div class="settings-section-title">Google Drive</div><p>使用 Google 官方授权，将书架备份到仅此应用可见的存储空间。访问令牌会在当前标签页本地缓存至过期，刷新时优先复用。</p><label class="field-label" for="google-client-id">OAuth 网页客户端 ID</label><input class="text-field" id="google-client-id" placeholder="例如 1234567890-abc.apps.googleusercontent.com" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="google-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">需在 Google Cloud 中启用 Drive API 并配置 OAuth 网页客户端。首次使用或令牌过期后，请点击“连接并同步”；当前标签页内刷新会复用有效令牌。</div></section>
         <section class="settings-section final-section"><div class="settings-section-title">书籍导入</div><p>支持 TXT、Markdown 和 EPUB。书籍文件保存在当前浏览器的本地数据库中。</p><button class="outline-button" id="import-books">导入书籍</button></section>
       </div>
       <div class="dialog-footer"><span>页间 · 版本 1.0</span><button class="text-button" id="clear-library">清空本机书架</button></div>
+    </dialog>
+
+    <dialog class="settings-dialog edit-book-dialog" id="edit-book-dialog">
+      <form class="edit-book-form" id="edit-book-form">
+        <div class="dialog-head"><div><span class="dialog-eyebrow">书籍管理</span><h2>编辑书籍</h2></div><button class="icon-button" type="button" id="close-edit-book" aria-label="关闭">×</button></div>
+        <div class="dialog-body">
+          <input type="hidden" id="edit-book-id" />
+          <label class="field-label" for="edit-book-title">书名</label><input class="text-field" id="edit-book-title" required maxlength="200" />
+          <label class="field-label" for="edit-book-author">作者</label><input class="text-field" id="edit-book-author" maxlength="200" />
+          <label class="field-label" for="replace-book-file">替换书籍文件</label><input class="text-field file-field" id="replace-book-file" type="file" accept=".txt,.md,.markdown,.epub" />
+          <div class="field-help">选择新文件后会替换当前书籍内容，并从头开始阅读；留空则只修改书名和作者。</div>
+        </div>
+        <div class="dialog-footer"><button class="outline-button" type="button" id="cancel-edit-book">取消</button><button class="primary-button" type="submit">保存</button></div>
+      </form>
     </dialog>
 
     <script src="./app.js" defer></script>

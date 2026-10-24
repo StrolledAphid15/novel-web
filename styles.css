@@ -66,8 +66,12 @@ button { cursor: pointer; }
 .collection-search { width: min(250px, 55%); height: 34px; padding: 0 10px; border: 1px solid #e5e6e0; border-radius: 4px; outline-color: #799181; background: #fff; color: #353832; font-size: 11px; }
 .collection-search::placeholder { color: #a1a39b; }
 .collection-grid { display: grid; max-width: 1040px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr)); gap: 10px; margin: 0 auto; }
-.collection-card { display: flex; min-width: 0; align-items: center; gap: 15px; padding: 15px; border: 1px solid #e9eae5; border-radius: 5px; background: #fdfdfb; color: #363a34; text-align: left; transition: border-color .15s, background .15s; }
+.collection-card { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 10px; border: 1px solid #e9eae5; border-radius: 5px; background: #fdfdfb; color: #363a34; transition: border-color .15s, background .15s; }
 .collection-card:hover { border-color: #cfd8ce; background: #fff; }
+.collection-open { display: flex; min-width: 0; flex: 1; align-items: center; gap: 15px; padding: 5px; border: 0; background: transparent; color: inherit; text-align: left; }
+.collection-card-actions { display: flex; flex: none; gap: 5px; }
+.collection-card-actions .text-button { padding: 6px; color: #73776d; font-size: 10px; }
+.collection-card-actions .book-delete { color: #9a766c; }
 .collection-cover { display: flex; width: 61px; height: 82px; flex: none; flex-direction: column; align-items: center; justify-content: space-between; padding: 17px 5px 7px; border-radius: 3px; background: #dce3d9; color: #526958; box-shadow: inset -4px 0 #52695812; }
 .collection-card:nth-child(3n) .collection-cover { background: #e7ddd2; color: #856e57; }
 .collection-card:nth-child(3n + 1) .collection-cover { background: #dbe4e4; color: #58716c; }
@@ -145,6 +149,10 @@ button { cursor: pointer; }
 .sync-feedback { color: #81867e; font-size: 10px; }
 .dialog-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 25px; border-top: 1px solid var(--line); color: #a0a198; font-size: 10px; }
 .text-button { border: 0; background: transparent; color: #9a766c; font-size: 10px; }
+.edit-book-form { margin: 0; }
+.edit-book-dialog .dialog-body { padding-bottom: 20px; }
+.edit-book-dialog .dialog-footer { justify-content: flex-end; gap: 9px; }
+.file-field { height: auto; padding: 8px; }
 
 @media (max-width: 760px) {
   .app-shell { grid-template-columns: 1fr; }
