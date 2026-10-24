@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f7f7f4" />
+    <title>页间 · 小说阅读器</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;450;500;600;700&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
+    <script src="https://unpkg.com/epubjs@0.3.93/dist/epub.min.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <a class="brand" href="#" aria-label="页间首页"><span class="brand-mark">页</span><span>页间<span class="brand-dot">.</span></span></a>
+        <div class="side-label">个人空间</div>
+        <nav class="side-nav" aria-label="主导航">
+          <button class="nav-item active" data-view="library"><span class="nav-icon">▤</span>我的书架<span class="nav-count" id="book-count">1</span></button>
+        </nav>
+        <div class="shelf-heading"><span class="side-label">书籍</span><button class="icon-button small" id="add-book-side" title="导入书籍" aria-label="导入书籍">＋</button></div>
+        <input class="shelf-search" id="book-search" type="search" placeholder="搜索书名或作者" aria-label="搜索书名或作者" />
+        <div class="book-list" id="book-list"></div>
+        <div class="sidebar-bottom"><span class="sync-dot"></span><span id="local-status">仅保存在此设备</span></div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div class="breadcrumbs"><button class="mobile-menu icon-button" id="mobile-menu" aria-label="打开书架">☰</button><span>我的书架</span><span class="crumb-divider">/</span><span class="crumb-current" id="crumb-title">雾港来信</span></div>
+          <div class="top-actions"><button class="subtle-button" id="sync-open"><span class="sync-icon">⟳</span><span class="sync-label">同步</span></button></div>
+        </header>
+
+        <section class="collection-view" id="collection-view" hidden>
+          <div class="collection-header"><div><span class="collection-eyebrow" id="collection-eyebrow">个人书库</span><h1 id="collection-title">我的书架</h1></div><button class="primary-button" id="collection-import">＋ 导入书籍</button></div>
+          <div class="collection-controls"><span id="collection-count">1 本书</span><input class="collection-search" id="collection-search" type="search" placeholder="搜索书名或作者" aria-label="搜索书名或作者" /></div>
+          <div class="collection-grid" id="collection-grid"></div>
+          <div class="collection-empty" id="collection-empty" hidden><span class="empty-mark">页</span><strong id="collection-empty-title">这里还没有书</strong><span id="collection-empty-copy">导入 TXT、Markdown 或 EPUB 开始阅读。</span><button class="outline-button" id="collection-empty-import">导入书籍</button></div>
+        </section>
+
+        <section class="reader-stage">
+          <div class="reader-toolbar">
+            <div class="reading-label"><span class="reading-indicator"></span><span id="reading-state">正在阅读</span></div>
+            <div class="reader-tools">
+              <div class="chapter-tools"><button class="chapter-arrow" id="prev-chapter" aria-label="上一章" title="上一章">←</button><label class="select-wrap"><span class="sr-only">选择章节</span><select id="chapter-select" aria-label="选择章节"></select></label><button class="chapter-arrow" id="next-chapter" aria-label="下一章" title="下一章">→</button><span id="chapter-counter">01 / 03</span></div>
+              <span class="tool-divider"></span>
+              <button class="tool-button" id="font-down" aria-label="缩小字号" title="缩小字号">A−</button><span class="font-size-value" id="font-size-value">18</span><button class="tool-button" id="font-up" aria-label="放大字号" title="放大字号">A+</button>
+              <span class="tool-divider"></span>
+              <button class="theme-swatch theme-paper selected" data-theme="paper" title="纸白主题" aria-label="纸白主题"></button><button class="theme-swatch theme-warm" data-theme="warm" title="暖纸主题" aria-label="暖纸主题"></button><button class="theme-swatch theme-night" data-theme="night" title="夜间主题" aria-label="夜间主题"></button>
+            </div>
+          </div>
+
+          <div class="reader-scroll" id="reader-scroll">
+            <article class="reading-page" id="text-page">
+              <div class="book-kicker"><span class="kicker-line"></span><span id="book-author">原创短篇 · 试读</span></div>
+              <h1 class="chapter-title" id="chapter-title">第一章　雾起时分</h1>
+              <div class="chapter-meta"><span id="chapter-subtitle">一封寄错地址的信</span><span class="meta-dot">·</span><span id="chapter-reading-time">约 3 分钟</span></div>
+              <div class="prose" id="chapter-content"></div>
+              <div class="chapter-end"><span>— 本章完 —</span></div>
+            </article>
+            <div class="epub-host" id="epub-host" hidden></div>
+          </div>
+
+          <footer class="reader-footer"><div class="progress-track"><span class="progress-fill" id="progress-fill"></span></div><div class="progress-details"><span id="progress-chapter">第 1 章 · 雾起时分</span><span id="progress-percent">33%</span></div></footer>
+        </section>
+      </main>
+    </div>
+
+    <input class="sr-only" type="file" id="file-input" accept=".txt,.md,.markdown,.epub,text/plain,text/markdown,application/epub+zip" multiple />
+    <input class="sr-only" type="file" id="backup-input" accept=".json,application/json" />
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <dialog class="settings-dialog" id="settings-dialog">
+      <form method="dialog" class="dialog-head"><div><span class="dialog-eyebrow">偏好设置</span><h2>阅读与同步</h2></div><button class="icon-button" aria-label="关闭">×</button></form>
+      <div class="dialog-body">
+        <section class="settings-section"><div class="settings-section-title">本地备份</div><p>导出书架、阅读进度和设置，保存为一个 JSON 文件。</p><div class="settings-actions"><button class="outline-button" id="export-backup">导出备份</button><button class="outline-button" id="import-backup">导入备份</button></div></section>
+        <section class="settings-section"><div class="settings-section-title">Google Drive</div><p>使用 Google 官方授权，将书架备份到仅此应用可见的存储空间。</p><label class="field-label" for="google-client-id">OAuth 网页客户端 ID</label><input class="text-field" id="google-client-id" placeholder="例如 1234567890-abc.apps.googleusercontent.com" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="google-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">需要在 Google Cloud 中启用 Drive API 并配置 OAuth 网页客户端。</div></section>
+        <section class="settings-section final-section"><div class="settings-section-title">书籍导入</div><p>支持 TXT、Markdown 和 EPUB。书籍文件保存在当前浏览器的本地数据库中。</p><button class="outline-button" id="import-books">导入书籍</button></section>
+      </div>
+      <div class="dialog-footer"><span>页间 · 版本 1.0</span><button class="text-button" id="clear-library">清空本机书架</button></div>
+    </dialog>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
