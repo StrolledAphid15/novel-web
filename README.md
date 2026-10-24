@@ -10,6 +10,10 @@ python -m http.server 8000
 
 支持 TXT、Markdown、EPUB 导入，浏览器本地保存书籍和阅读位置；提供章节导航、字号、三种阅读主题，以及 JSON 备份导入导出。EPUB 渲染使用开源 [epub.js](https://github.com/futurepress/epub.js) 和 [JSZip](https://github.com/Stuk/jszip)，运行时从公共 CDN 加载；字体使用 Google Fonts，离线时回退到系统字体。
 
+## 安装为应用
+
+网站通过 HTTPS 访问时，可在 Microsoft Edge 打开后，从浏览器菜单选择“应用”→“将此站点安装为应用”，或使用地址栏中的安装图标。安装后会以独立窗口运行；书架和书籍保存在浏览器本地。离线时会缓存阅读器页面，但 Google Drive 同步及通过 CDN 加载的 EPUB 组件需要联网。
+
 ## Google Drive
 
 需要自行准备 Google Cloud OAuth 网页客户端 ID：

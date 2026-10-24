@@ -676,6 +676,9 @@ function bindEvents() {
 }
 
 async function init() {
+  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+    navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service Worker 注册失败：", error));
+  }
   books = await allBooks();
   if (!books.length) {
     await saveBook(sampleBook);
