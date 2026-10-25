@@ -1,9 +1,11 @@
 const DB_NAME = "yejian-reader";
 const DB_VERSION = 1;
-const GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
-const SYNC_FILE = "yejian-library-backup.json";
-const CLOUD_BOOK_MAX_AGE = 10 * 24 * 60 * 60 * 1000;
-const GOOGLE_TOKEN_KEY = "yejian-google-access-token";
+const GITHUB_REPO_KEY = "yejian-github-repo";
+const GITHUB_BRANCH_KEY = "yejian-github-branch";
+const GITHUB_TOKEN_KEY = "yejian-github-token";
+const GITHUB_MANIFEST_PATH = "sync/library-manifest.json";
+const DELETED_BOOKS_KEY = "yejian-deleted-books";
+const SETTINGS_UPDATED_KEY = "yejian-settings-updated-at";
 const ACTIVE_BOOK_KEY = "yejian-active-book-id";
 
 const sampleBook = {
@@ -31,14 +33,14 @@ let epubBook = null;
 let epubRendition = null;
 let epubChapters = [];
 let activeEpubChapter = 0;
-let googleTokenClient = null;
-let accessToken = null;
+let githubToken = null;
 let toastTimer;
 let textProgressSaveTimer = null;
+let syncDebounceTimer = null;
 let syncInProgress = false;
+let syncPending = false;
+let manifestConflictRetries = 0;
 let syncRunId = 0;
-let currentSyncAutomatic = false;
-let rejectPendingTokenRequest = null;
 let lastAutoSyncAttempt = 0;
 
 function openDatabase() {
@@ -151,6 +153,8 @@ async function removeBook(id) {
   if (!book || !confirm(`删除《${book.title}》及其书籍文件和阅读进度？此操作无法撤销。`)) return;
   if (id === activeBookId) saveTextProgress(true);
   await deleteBook(id);
+  const deleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
+  localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify([...new Set([...deleted, id])]));
   books = books.filter((item) => item.id !== id);
   if (id === activeBookId) {
     epubRendition?.destroy();
@@ -165,6 +169,7 @@ async function removeBook(id) {
   }
   renderShelf();
   renderCollection();
+  scheduleGitHubSync();
   notify("书籍已删除");
 }
 
@@ -187,8 +192,10 @@ async function updateBook(event) {
   book.title = title;
   book.author = $("#edit-book-author").value.trim();
   book.updatedAt = Date.now();
+  book.metadataUpdatedAt = book.updatedAt;
   if (replacement) {
-    Object.assign(book, replacement, { progress: 0, scrollProgress: 0 });
+    Object.assign(book, replacement, { progress: 0, scrollProgress: 0, contentUpdatedAt: book.updatedAt });
+    delete book.contentHash;
     delete book.cfi;
   }
   await saveBook(book);
@@ -197,6 +204,7 @@ async function updateBook(event) {
   renderShelf();
   renderCollection();
   if (id === activeBookId) await selectBook(id);
+  scheduleGitHubSync();
   notify(replacement ? "书籍信息和文件已更新" : "书籍信息已更新");
 }
 
@@ -220,15 +228,18 @@ function saveTextProgress(immediate = false) {
   book.progress = activeChapter;
   book.scrollProgress = maxScroll ? Math.min(1, Math.max(0, scroller.scrollTop / maxScroll)) : 0;
   book.updatedAt = Date.now();
+  book.progressUpdatedAt = book.updatedAt;
   clearTimeout(textProgressSaveTimer);
   if (immediate) {
     textProgressSaveTimer = null;
     saveBook(book);
+    scheduleGitHubSync();
     return;
   }
   textProgressSaveTimer = setTimeout(() => {
     textProgressSaveTimer = null;
     saveBook(book);
+    scheduleGitHubSync();
   }, 250);
 }
 
@@ -269,11 +280,12 @@ function renderTextChapter(index, save = true) {
     book.progress = activeChapter;
     book.scrollProgress = 0;
     book.updatedAt = Date.now();
+    book.progressUpdatedAt = book.updatedAt;
     saveBook(book);
   }
 }
 
-function setTheme(theme) {
+function setTheme(theme, sync = true) {
   activeTheme = theme;
   const stage = document.querySelector(".reader-stage");
   stage.classList.remove("theme-paper", "theme-warm", "theme-night");
@@ -281,15 +293,23 @@ function setTheme(theme) {
   document.querySelectorAll(".theme-swatch").forEach((button) => button.classList.toggle("selected", button.dataset.theme === theme));
   document.querySelector("meta[name='theme-color']").content = theme === "night" ? "#222623" : theme === "warm" ? "#f4f0e7" : "#f7f7f4";
   localStorage.setItem("yejian-theme", theme);
+  if (sync) {
+    localStorage.setItem(SETTINGS_UPDATED_KEY, String(Date.now()));
+    scheduleGitHubSync();
+  }
   const rendition = epubRendition;
   if (rendition) rendition.themes.default({ body: { color: theme === "night" ? "#dddcd2 !important" : theme === "warm" ? "#453d34 !important" : "#373833 !important", background: theme === "night" ? "#222623 !important" : theme === "warm" ? "#f4f0e7 !important" : "#fbfbf9 !important" } });
 }
 
-function setFontSize(size) {
+function setFontSize(size, sync = true) {
   fontSize = Math.max(14, Math.min(28, size));
   $("#font-size-value").textContent = fontSize;
   $("#chapter-content").style.fontSize = `${fontSize}px`;
   localStorage.setItem("yejian-font-size", String(fontSize));
+  if (sync) {
+    localStorage.setItem(SETTINGS_UPDATED_KEY, String(Date.now()));
+    scheduleGitHubSync();
+  }
   if (epubRendition) epubRendition.themes.fontSize(`${fontSize}px`);
 }
 
@@ -305,7 +325,7 @@ async function selectBook(id, { sync = true } = {}) {
   setView("reader");
   if (book.format === "epub") {
     await showEpub(book);
-    if (sync) syncToDrive({ automatic: true });
+    if (sync) scheduleGitHubSync();
     return;
   }
   if (epubRendition) epubRendition.destroy();
@@ -313,7 +333,7 @@ async function selectBook(id, { sync = true } = {}) {
   epubChapters = [];
   renderTextChapter(Number(book.progress) || 0, false);
   if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
-  if (sync) syncToDrive({ automatic: true });
+  if (sync) scheduleGitHubSync();
 }
 
 function flattenToc(items, result = []) {
@@ -339,7 +359,11 @@ async function showEpub(book) {
       epubBook.loaded.navigation.catch(() => ({ toc: [] })),
       epubBook.loaded.metadata.catch(() => ({}))
     ]);
-    if (metadata.creator) book.author = metadata.creator;
+    if (metadata.creator && metadata.creator !== book.author) {
+      book.author = metadata.creator;
+      book.metadataUpdatedAt = Date.now();
+      saveBook(book);
+    }
     const spineItems = epubBook.spine.spineItems || [];
     const toc = flattenToc(navigation.toc);
     epubChapters = toc.length ? toc : spineItems.map((item, index) => ({ href: item.href, label: `第 ${index + 1} 节` }));
@@ -361,6 +385,8 @@ async function showEpub(book) {
       book.cfi = location.start.cfi;
       book.progress = percent;
       book.updatedAt = Date.now();
+      book.progressUpdatedAt = book.updatedAt;
+      scheduleGitHubSync();
       $("#chapter-title").textContent = chapter.label;
       $("#chapter-select").value = chapter.href;
       $("#chapter-counter").textContent = `${String(activeEpubChapter + 1).padStart(2, "0")} / ${String(epubChapters.length).padStart(2, "0")}`;
@@ -419,24 +445,27 @@ async function importFiles(fileList) {
     const id = crypto.randomUUID();
     if (/\.epub$/i.test(file.name)) {
       const data = await file.arrayBuffer();
-      const book = { id, title, author: "", format: "epub", data, addedAt: Date.now(), updatedAt: Date.now(), progress: 0 };
+      const book = { id, title, author: "", format: "epub", data, addedAt: Date.now(), updatedAt: Date.now(), contentUpdatedAt: Date.now(), progress: 0 };
       await saveBook(book);
       activeBookId = id;
       continue;
     }
     const content = await file.text();
     const chapters = splitIntoChapters(content);
-    await saveBook({ id, title, author: "", format: "text", chapters, addedAt: Date.now(), updatedAt: Date.now(), progress: 0 });
+    await saveBook({ id, title, author: "", format: "text", chapters, addedAt: Date.now(), updatedAt: Date.now(), contentUpdatedAt: Date.now(), progress: 0 });
     activeBookId = id;
   }
   books = await allBooks();
   renderShelf();
   await selectBook(activeBookId);
+  scheduleGitHubSync();
   if (fileList.length) notify(`已导入 ${fileList.length} 本书`);
 }
 
 function openSettings() {
-  $("#google-client-id").value = localStorage.getItem("yejian-google-client-id") || "";
+  $("#github-repository").value = localStorage.getItem(GITHUB_REPO_KEY) || "";
+  $("#github-branch").value = localStorage.getItem(GITHUB_BRANCH_KEY) || "main";
+  $("#github-token").value = localStorage.getItem(GITHUB_TOKEN_KEY) || "";
   $("#settings-dialog").showModal();
 }
 
@@ -475,31 +504,21 @@ async function importBackup(file) {
   if (data.settings?.theme) setTheme(data.settings.theme);
   renderShelf();
   if (books.length) await selectBook(activeBookId);
+  scheduleGitHubSync();
   notify("备份已导入");
 }
 
-function loadGoogleIdentity() {
-  const interval = setInterval(() => {
-    if (!window.google?.accounts?.oauth2) return;
-    clearInterval(interval);
-    const clientId = localStorage.getItem("yejian-google-client-id");
-    if (clientId) resumeGoogleSync();
-  }, 150);
-  setTimeout(() => clearInterval(interval), 15000);
-}
-
-function resumeGoogleSync() {
+function resumeGitHubSync() {
   if (document.visibilityState === "hidden") return;
-  if (!cachedGoogleToken()) {
-    if (localStorage.getItem("yejian-google-client-id")) {
-      $("#sync-feedback").textContent = "请点击“连接并同步”重新授权";
-      $("#local-status").textContent = "云盘待重新连接";
-    }
-    return;
-  }
+  if (!localStorage.getItem(GITHUB_REPO_KEY) || !localStorage.getItem(GITHUB_TOKEN_KEY)) return;
   if (Date.now() - lastAutoSyncAttempt < 5000) return;
   lastAutoSyncAttempt = Date.now();
-  syncToDrive({ automatic: true });
+  syncToGitHub({ automatic: true });
+}
+
+function scheduleGitHubSync() {
+  clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(() => syncToGitHub({ automatic: true }), 10000);
 }
 
 function moveChapter(offset) {
@@ -514,131 +533,222 @@ function moveChapter(offset) {
   renderTextChapter(activeChapter + offset);
 }
 
-function requestGoogleToken(clientId, prompt) {
-  return new Promise((resolve, reject) => {
-    if (!window.google?.accounts?.oauth2) return reject(new Error("Google 授权组件尚未加载，请刷新页面后重试"));
-    const timeout = setTimeout(() => {
-      rejectPendingTokenRequest = null;
-      reject(new Error(prompt === "none" ? "无法静默连接 Google，请点击“连接并同步”重新授权" : "Google 授权超时，请重试"));
-    }, prompt === "none" ? 8000 : 120000);
-    const finish = (callback) => (value) => {
-      clearTimeout(timeout);
-      rejectPendingTokenRequest = null;
-      callback(value);
-    };
-    rejectPendingTokenRequest = finish(reject);
-    googleTokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: GOOGLE_SCOPE, callback: (response) => {
-      if (response.error) {
-        finish(reject)(new Error(response.error_description || response.error));
-        return;
-      }
-      const token = { value: response.access_token, expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000 };
-      localStorage.setItem(GOOGLE_TOKEN_KEY, JSON.stringify(token));
-      sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
-      finish(resolve)(token.value);
-    } });
-    if (prompt) googleTokenClient.requestAccessToken({ prompt });
-    else googleTokenClient.requestAccessToken();
-  });
+function cloudContent(book) {
+  return book.format === "epub" ? { format: "epub", data: book.data } : { format: "text", chapters: book.chapters };
 }
 
-function cachedGoogleToken() {
-  try {
-    const persistedToken = localStorage.getItem(GOOGLE_TOKEN_KEY);
-    const token = JSON.parse(persistedToken || sessionStorage.getItem(GOOGLE_TOKEN_KEY) || "null");
-    if (token?.value && token.expiresAt > Date.now() + 30000) {
-      if (!persistedToken) localStorage.setItem(GOOGLE_TOKEN_KEY, JSON.stringify(token));
-      sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
-      return token.value;
-    }
-  } catch {}
-  localStorage.removeItem(GOOGLE_TOKEN_KEY);
-  sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
-  return null;
+async function contentHash(content) {
+  const bytes = new TextEncoder().encode(encodeBackup(content));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-function recentForCloud(book, now = Date.now()) {
-  const lastOpened = Number(book.lastOpenedAt || book.updatedAt || book.addedAt || 0);
-  return lastOpened >= now - CLOUD_BOOK_MAX_AGE;
+async function bookContentHash(book) {
+  if (book.contentHash) return book.contentHash;
+  book.contentHash = await contentHash(cloudContent(book));
+  book.contentUpdatedAt ||= book.addedAt || book.updatedAt || Date.now();
+  await saveBook(book);
+  return book.contentHash;
 }
 
-async function driveRequest(path, options = {}) {
-  const response = await fetch(`https://www.googleapis.com/drive/v3/${path}`, { ...options, headers: { Authorization: `Bearer ${accessToken}`, ...options.headers } });
+function githubRepository() {
+  return (localStorage.getItem(GITHUB_REPO_KEY) || "").trim();
+}
+
+function githubFileUrl(path, branch) {
+  const repository = githubRepository();
+  const [owner, name] = repository.split("/");
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const query = branch ? `?ref=${encodeURIComponent(branch)}` : "";
+  return `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/${encodedPath}${query}`;
+}
+
+async function githubRequest(path, branch, options = {}) {
+  const { raw = false, allowMissing = false, ...requestOptions } = options;
+  const headers = {
+    Authorization: `Bearer ${githubToken}`,
+    Accept: raw ? "application/vnd.github.raw+json" : "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    ...requestOptions.headers
+  };
+  const url = githubFileUrl(path, ["PUT", "DELETE"].includes(requestOptions.method) ? "" : branch);
+  const response = await fetch(url, { ...requestOptions, headers });
+  if (response.status === 404 && allowMissing) return null;
   if (!response.ok) {
-    if (response.status === 401) {
-      localStorage.removeItem(GOOGLE_TOKEN_KEY);
-      sessionStorage.removeItem(GOOGLE_TOKEN_KEY);
-    }
-    throw new Error(`Google Drive 请求失败 (${response.status})`);
+    if (response.status === 401) localStorage.removeItem(GITHUB_TOKEN_KEY);
+    const detail = await response.text();
+    if ((response.status === 409 || response.status === 422) && /sha|conflict|reference/i.test(detail)) throw new Error("GitHub 仓库刚被另一台设备更新，请重新同步");
+    throw new Error(`GitHub 请求失败 (${response.status})${detail ? `：${detail.slice(0, 180)}` : ""}`);
   }
-  return response.status === 204 ? null : response.json();
+  return response;
 }
 
-async function syncToDrive({ automatic = false } = {}) {
-  if (syncInProgress) {
-    if (automatic || !currentSyncAutomatic) return;
-    rejectPendingTokenRequest?.(new Error("自动连接已由手动连接接管"));
+function encodeGitHubContent(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  return btoa(binary);
+}
+
+function decodeGitHubContent(content) {
+  const binary = atob(content.replace(/\s/g, ""));
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+async function readGitHubJson(path, branch) {
+  let response = await githubRequest(path, branch, { allowMissing: true });
+  if (!response) return null;
+  let file = await response.json();
+  if (file.encoding !== "base64" || !file.content) {
+    response = await githubRequest(path, branch, { raw: true });
+    file = { content: await response.text(), sha: file.sha };
+    return { value: decodeBackup(file.content), sha: file.sha };
   }
-  const clientId = (automatic ? localStorage.getItem("yejian-google-client-id") || "" : $("#google-client-id").value).trim();
-  if (!clientId) {
-    if (!automatic) notify("请先填写 OAuth 网页客户端 ID");
+  return { value: decodeBackup(decodeGitHubContent(file.content)), sha: file.sha };
+}
+
+async function writeGitHubJson(path, value, branch, sha = null) {
+  const response = await githubRequest(path, branch, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: `Sync novel-web data: ${path.split("/").at(-1)}`, content: encodeGitHubContent(encodeBackup(value)), branch, ...(sha ? { sha } : {}) })
+  });
+  return response.json();
+}
+
+async function deleteGitHubFile(path, branch, sha) {
+  const response = await githubRequest(path, branch, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: `Delete novel-web data: ${path.split("/").at(-1)}`, sha, branch }),
+    allowMissing: true
+  });
+  return response?.json();
+}
+
+function bookDescriptor(book, contentHash, fileSha) {
+  return {
+    id: book.id, title: book.title, author: book.author || "", format: book.format,
+    addedAt: book.addedAt || Date.now(), updatedAt: book.updatedAt || Date.now(),
+    metadataUpdatedAt: book.metadataUpdatedAt || book.addedAt || book.updatedAt || Date.now(),
+    contentUpdatedAt: book.contentUpdatedAt || book.addedAt || book.updatedAt || Date.now(),
+    progress: book.progress || 0, scrollProgress: book.scrollProgress || 0, cfi: book.cfi || "",
+    progressUpdatedAt: book.progressUpdatedAt || book.updatedAt || book.addedAt || Date.now(),
+    lastOpenedAt: book.lastOpenedAt || 0, contentHash, fileSha
+  };
+}
+
+function mergeDescriptor(local, remote) {
+  const metadata = (remote.metadataUpdatedAt || 0) > (local.metadataUpdatedAt || 0) ? remote : local;
+  const progress = (remote.progressUpdatedAt || 0) > (local.progressUpdatedAt || 0) ? remote : local;
+  return { ...local, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || Date.now(), remote.addedAt || Date.now()), metadataUpdatedAt: metadata.metadataUpdatedAt, progress: progress.progress, scrollProgress: progress.scrollProgress, cfi: progress.cfi, progressUpdatedAt: progress.progressUpdatedAt, lastOpenedAt: Math.max(local.lastOpenedAt || 0, remote.lastOpenedAt || 0) };
+}
+
+async function syncToGitHub({ automatic = false } = {}) {
+  if (syncInProgress) { syncPending = syncPending || automatic; return; }
+  const repository = (automatic ? localStorage.getItem(GITHUB_REPO_KEY) || "" : $("#github-repository").value).trim();
+  const token = (automatic ? localStorage.getItem(GITHUB_TOKEN_KEY) || "" : $("#github-token").value).trim();
+  const branch = (automatic ? localStorage.getItem(GITHUB_BRANCH_KEY) || "main" : $("#github-branch").value || "main").trim();
+  if (!repository || !token) {
+    if (!automatic) notify("请填写 GitHub 仓库和访问令牌");
     return;
   }
-  const savedToken = cachedGoogleToken();
-  if (automatic && !savedToken) {
-    $("#sync-feedback").textContent = "请点击“连接并同步”完成授权";
-    $("#local-status").textContent = "等待 Google 授权";
+  if (!/^[^/]+\/[^/]+$/.test(repository)) {
+    if (!automatic) notify("仓库格式应为 owner/repository");
     return;
   }
   syncInProgress = true;
-  currentSyncAutomatic = automatic;
   const runId = ++syncRunId;
-  localStorage.setItem("yejian-google-client-id", clientId);
-  $("#sync-feedback").textContent = automatic ? "正在自动同步…" : "正在授权…";
+  localStorage.setItem(GITHUB_REPO_KEY, repository);
+  localStorage.setItem(GITHUB_BRANCH_KEY, branch);
+  localStorage.setItem(GITHUB_TOKEN_KEY, token);
+  githubToken = token;
+  $("#sync-feedback").textContent = automatic ? "正在自动同步…" : "正在连接 GitHub…";
   try {
-    accessToken = savedToken || await requestGoogleToken(clientId);
     if (runId !== syncRunId) return;
-    $("#sync-feedback").textContent = "正在同步书架…";
-    const result = await driveRequest("files?spaces=appDataFolder&q=name%3D%27yejian-library-backup.json%27&fields=files(id,name)");
-    const fileId = result.files?.[0]?.id;
-    if (fileId) {
-      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${accessToken}` } });
-      if (!response.ok) throw new Error(`无法读取云端备份 (${response.status})`);
-      const cloudBackup = decodeBackup(await response.text());
-      if (!Array.isArray(cloudBackup.books)) throw new Error("云端备份文件格式不正确");
-      const now = Date.now();
-      const merged = new Map(cloudBackup.books.filter((book) => recentForCloud(book, now)).map((book) => [book.id, book]));
-      for (const local of books.filter((book) => recentForCloud(book, now))) {
-        const cloud = merged.get(local.id);
-        if (!cloud || (local.updatedAt || local.addedAt || 0) > (cloud.updatedAt || cloud.addedAt || 0)) merged.set(local.id, local);
-      }
-      const localById = new Map(books.map((book) => [book.id, book]));
-      for (const cloud of merged.values()) {
-        const local = localById.get(cloud.id);
-        if (!local || (cloud.updatedAt || cloud.addedAt || 0) > (local.updatedAt || local.addedAt || 0)) localById.set(cloud.id, cloud);
-      }
-      books = [...localById.values()];
-      await replaceBooks(books);
+    $("#sync-feedback").textContent = "正在核对书架…";
+    const manifestRead = await readGitHubJson(GITHUB_MANIFEST_PATH, branch);
+    let cloudManifest = manifestRead?.value || null;
+    if (cloudManifest?.settings && (cloudManifest.settingsUpdatedAt || 0) > Number(localStorage.getItem(SETTINGS_UPDATED_KEY) || 0)) {
+      setFontSize(Number(cloudManifest.settings.fontSize) || fontSize, false);
+      setTheme(cloudManifest.settings.theme || activeTheme, false);
+      localStorage.setItem(SETTINGS_UPDATED_KEY, String(cloudManifest.settingsUpdatedAt));
     }
-    const cloudBooks = books.filter((book) => recentForCloud(book));
-    const payload = encodeBackup({ version: 1, exportedAt: new Date().toISOString(), books: cloudBooks, settings: { fontSize, theme: activeTheme } });
-    const fileMetadata = { name: SYNC_FILE, mimeType: "application/json", ...(!fileId ? { parents: ["appDataFolder"] } : {}) };
-    const boundary = `yejian_${crypto.randomUUID()}`;
-    const body = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(fileMetadata)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n--${boundary}--`], { type: `multipart/related; boundary=${boundary}` });
-    const endpoint = fileId ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart` : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
-    const response = await fetch(endpoint, { method: fileId ? "PATCH" : "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": `multipart/related; boundary=${boundary}` }, body });
-    if (!response.ok) throw new Error(`备份上传失败 (${response.status})`);
+    const localBooks = new Map(books.map((book) => [book.id, book]));
+    const remoteBooks = new Map((cloudManifest?.books || []).map((book) => [book.id, book]));
+    const tombstones = new Map((cloudManifest?.deleted || []).map((item) => [item.id, item.deletedAt]));
+    const localDeleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
+    localDeleted.forEach((id) => tombstones.set(id, Math.max(tombstones.get(id) || 0, Date.now())));
+    const mergedBooks = new Map();
+
+    for (const [id, local] of localBooks) {
+      const deletedAt = tombstones.get(id) || 0;
+      if (deletedAt >= (local.updatedAt || local.addedAt || 0)) continue;
+      const remote = remoteBooks.get(id);
+      const localHash = await bookContentHash(local);
+      let chosen = { ...local };
+      let fileSha = remote?.fileSha || null;
+      const path = `sync/books/${id}.json`;
+      if (!remote) {
+        const saved = await writeGitHubJson(path, cloudContent(local), branch);
+        fileSha = saved.content.sha;
+      } else if (remote.contentHash !== localHash) {
+        const localContentAt = local.contentUpdatedAt || local.addedAt || local.updatedAt || 0;
+        if (localContentAt >= (remote.contentUpdatedAt || 0)) {
+          const saved = await writeGitHubJson(path, cloudContent(local), branch, remote.fileSha);
+          fileSha = saved.content.sha;
+        } else {
+          const remoteContentRead = await readGitHubJson(path, branch);
+          if (!remoteContentRead) throw new Error(`云端缺少《${remote.title}》的书籍文件`);
+          if (await contentHash(remoteContentRead.value) !== remote.contentHash) throw new Error(`《${remote.title}》的云端内容校验失败`);
+          chosen = { ...local, ...remoteContentRead.value, contentHash: remote.contentHash, contentUpdatedAt: remote.contentUpdatedAt };
+          fileSha = remoteContentRead.sha;
+        }
+      }
+      if (remote) chosen = mergeDescriptor(chosen, remote);
+      mergedBooks.set(id, { ...chosen, contentHash: chosen.contentHash || localHash, fileSha });
+    }
+
+    for (const [id, remote] of remoteBooks) {
+      if (mergedBooks.has(id) || (tombstones.get(id) || 0) >= (remote.updatedAt || remote.addedAt || 0)) continue;
+      const contentRead = await readGitHubJson(`sync/books/${id}.json`, branch);
+      if (!contentRead) throw new Error(`云端缺少《${remote.title}》的书籍文件`);
+      if (await contentHash(contentRead.value) !== remote.contentHash) throw new Error(`《${remote.title}》的云端内容校验失败`);
+      mergedBooks.set(id, { ...remote, ...contentRead.value, progress: remote.progress || 0, fileSha: contentRead.sha });
+    }
+
+    const syncedBooks = [...mergedBooks.values()];
+    await replaceBooks(syncedBooks);
+    books = syncedBooks;
+    for (const [id] of tombstones) {
+      const remote = remoteBooks.get(id);
+      if (remote?.fileSha) await deleteGitHubFile(`sync/books/${id}.json`, branch, remote.fileSha);
+    }
+    const manifest = { version: 2, updatedAt: cloudManifest?.updatedAt || 0, settingsUpdatedAt: Number(localStorage.getItem(SETTINGS_UPDATED_KEY) || Date.now()), settings: { fontSize, theme: activeTheme }, books: syncedBooks.map((book) => bookDescriptor(book, book.contentHash, book.fileSha)), deleted: [...tombstones].map(([id, deletedAt]) => ({ id, deletedAt })) };
+    const { updatedAt: ignoredUpdatedAt, ...manifestState } = manifest;
+    const { updatedAt: ignoredCloudUpdatedAt, ...cloudManifestState } = cloudManifest || {};
+    if (!cloudManifest || JSON.stringify(manifestState) !== JSON.stringify(cloudManifestState)) {
+      manifest.updatedAt = Date.now();
+      await writeGitHubJson(GITHUB_MANIFEST_PATH, manifest, branch, manifestRead?.sha || null);
+    }
+    localStorage.removeItem(DELETED_BOOKS_KEY);
+    manifestConflictRetries = 0;
     $("#sync-feedback").textContent = `已同步 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
-    $("#local-status").textContent = "已连接 Google Drive";
+    $("#local-status").textContent = "已连接 GitHub";
     renderShelf();
     if (!automatic) {
       $("#settings-dialog").close();
       setView("library");
       renderCollection();
-      notify("书架已同步到 Google Drive");
+      notify("书架已同步到 GitHub");
     }
   } catch (error) {
     if (runId !== syncRunId) return;
+    if (error.message.startsWith("GitHub 仓库刚被另一台设备更新") && manifestConflictRetries < 1) {
+      manifestConflictRetries += 1;
+      syncPending = true;
+    }
     $("#sync-feedback").textContent = error.message;
     if (automatic) {
       $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
@@ -648,8 +758,10 @@ async function syncToDrive({ automatic = false } = {}) {
   } finally {
     if (runId === syncRunId) {
       syncInProgress = false;
-      currentSyncAutomatic = false;
-      rejectPendingTokenRequest = null;
+      if (syncPending) {
+        syncPending = false;
+        scheduleGitHubSync();
+      }
     }
   }
 }
@@ -659,10 +771,10 @@ function bindEvents() {
   window.addEventListener("pagehide", persistReadingState);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") persistReadingState();
-    else resumeGoogleSync();
+    else resumeGitHubSync();
   });
-  window.addEventListener("pageshow", resumeGoogleSync);
-  window.addEventListener("online", resumeGoogleSync);
+  window.addEventListener("pageshow", resumeGitHubSync);
+  window.addEventListener("online", resumeGitHubSync);
   $(".brand").addEventListener("click", (event) => {
     event.preventDefault();
     saveTextProgress(true);
@@ -675,7 +787,7 @@ function bindEvents() {
   $("#export-backup").addEventListener("click", downloadBackup);
   $("#import-backup").addEventListener("click", () => $("#backup-input").click());
   $("#sync-open").addEventListener("click", openSettings);
-  $("#google-sync").addEventListener("click", syncToDrive);
+  $("#github-sync").addEventListener("click", syncToGitHub);
   $("#font-down").addEventListener("click", () => setFontSize(fontSize - 1));
   $("#font-up").addEventListener("click", () => setFontSize(fontSize + 1));
   document.querySelectorAll(".theme-swatch").forEach((button) => button.addEventListener("click", () => setTheme(button.dataset.theme)));
@@ -693,12 +805,15 @@ function bindEvents() {
   $("#cancel-edit-book").addEventListener("click", () => $("#edit-book-dialog").close());
   $("#clear-library").addEventListener("click", async () => {
     if (!confirm("清空此设备上的书架和阅读进度？此操作无法撤销。")) return;
+    const deleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
+    localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify([...new Set([...deleted, ...books.filter((book) => book.id !== sampleBook.id).map((book) => book.id)])]));
     await replaceBooks([sampleBook]);
     books = [sampleBook];
     activeBookId = sampleBook.id;
     renderShelf();
     setView("library");
     renderTextChapter(0, false);
+    scheduleGitHubSync();
     $("#settings-dialog").close();
     notify("本机书架已清空");
   });
@@ -710,6 +825,10 @@ function bindEvents() {
 }
 
 async function init() {
+  localStorage.removeItem("yejian-onedrive-client-id");
+  localStorage.removeItem("yejian-google-client-id");
+  localStorage.removeItem("yejian-google-access-token");
+  sessionStorage.removeItem("yejian-google-access-token");
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
     navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service Worker 注册失败：", error));
   }
@@ -725,13 +844,18 @@ async function init() {
   openedBook.lastOpenedAt = Date.now();
   await saveBook(openedBook);
   renderShelf();
-  setTheme(activeTheme);
-  setFontSize(fontSize);
+  setTheme(activeTheme, false);
+  setFontSize(fontSize, false);
   bindEvents();
   setView("library");
   if (activeBook().format === "epub") await showEpub(activeBook());
   else renderTextChapter(Number(activeBook().progress) || 0, false);
-  loadGoogleIdentity();
+  const repository = localStorage.getItem(GITHUB_REPO_KEY);
+  const token = localStorage.getItem(GITHUB_TOKEN_KEY);
+  if (repository && token) {
+    githubToken = token;
+    resumeGitHubSync();
+  }
 }
 
 init().catch((error) => notify(`阅读器启动失败：${error.message}`));
