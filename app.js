@@ -36,6 +36,7 @@ let activeEpubChapter = 0;
 let githubToken = null;
 let toastTimer;
 let textProgressSaveTimer = null;
+let textProgressNeedsSync = false;
 let syncDebounceTimer = null;
 let syncInProgress = false;
 let syncPending = false;
@@ -195,6 +196,7 @@ async function updateBook(event) {
     Object.assign(book, replacement, { progress: 0, scrollProgress: 0, contentUpdatedAt: book.updatedAt });
     delete book.contentHash;
     delete book.cfi;
+    delete book.locations;
   }
   await saveBook(book);
   books = await allBooks();
@@ -223,21 +225,31 @@ function saveTextProgress(immediate = false) {
   if (book.format !== "text" || $(".reader-stage").hidden) return;
   const scroller = $("#reader-scroll");
   const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-  book.progress = activeChapter;
-  book.scrollProgress = maxScroll ? Math.min(1, Math.max(0, scroller.scrollTop / maxScroll)) : 0;
-  book.updatedAt = Date.now();
-  book.progressUpdatedAt = book.updatedAt;
+  const progress = activeChapter;
+  const scrollProgress = maxScroll ? Math.min(1, Math.max(0, scroller.scrollTop / maxScroll)) : 0;
+  const changed = book.progress !== progress || (book.scrollProgress || 0) !== scrollProgress;
+  book.progress = progress;
+  book.scrollProgress = scrollProgress;
+  if (changed) {
+    book.updatedAt = Date.now();
+    book.progressUpdatedAt = book.updatedAt;
+    textProgressNeedsSync = true;
+  }
   clearTimeout(textProgressSaveTimer);
   if (immediate) {
     textProgressSaveTimer = null;
+    const needsSync = textProgressNeedsSync;
+    textProgressNeedsSync = false;
     const saved = saveBook(book);
-    scheduleGitHubSync();
+    if (needsSync) scheduleGitHubSync();
     return saved;
   }
   textProgressSaveTimer = setTimeout(() => {
     textProgressSaveTimer = null;
+    const needsSync = textProgressNeedsSync;
+    textProgressNeedsSync = false;
     saveBook(book);
-    scheduleGitHubSync();
+    if (needsSync) scheduleGitHubSync();
   }, 250);
 }
 
@@ -310,19 +322,17 @@ function setFontSize(size, sync = true) {
   if (epubRendition) epubRendition.themes.fontSize(`${fontSize}px`);
 }
 
-async function selectBook(id, { sync = true } = {}) {
+async function selectBook(id) {
   saveTextProgress(true);
   activeBookId = id;
   localStorage.setItem(ACTIVE_BOOK_KEY, id);
   const book = activeBook();
-  book.updatedAt = Date.now();
-  book.lastOpenedAt = book.updatedAt;
+  book.lastOpenedAt = Date.now();
   await saveBook(book);
   renderShelf();
   setView("reader");
   if (book.format === "epub") {
     await showEpub(book);
-    if (sync) scheduleGitHubSync();
     return;
   }
   if (epubRendition) epubRendition.destroy();
@@ -330,7 +340,6 @@ async function selectBook(id, { sync = true } = {}) {
   epubChapters = [];
   renderTextChapter(Number(book.progress) || 0, false);
   if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
-  if (sync) scheduleGitHubSync();
 }
 
 function flattenToc(items, result = []) {
@@ -352,7 +361,12 @@ async function showEpub(book) {
     await new Promise(requestAnimationFrame);
     epubBook = ePub(book.data);
     await epubBook.ready;
-    await epubBook.locations.generate(1000);
+    if (book.locations) epubBook.locations.load(book.locations);
+    else {
+      await epubBook.locations.generate(1000);
+      book.locations = epubBook.locations.save();
+      await saveBook(book);
+    }
     const [navigation, metadata] = await Promise.all([
       epubBook.loaded.navigation.catch(() => ({ toc: [] })),
       epubBook.loaded.metadata.catch(() => ({}))
@@ -383,11 +397,14 @@ async function showEpub(book) {
       const chapter = epubChapters.find((item) => item.href.split("#")[0] === href) || epubChapters.find((item) => item.href.split("#")[0] === spineHref) || epubChapters[0];
       activeEpubChapter = epubChapters.indexOf(chapter);
       const percent = epubBook.locations.percentageFromCfi(location.start.cfi) || 0;
+      const progressChanged = book.cfi !== location.start.cfi || book.progress !== percent;
       book.cfi = location.start.cfi;
       book.progress = percent;
-      book.updatedAt = Date.now();
-      book.progressUpdatedAt = book.updatedAt;
-      scheduleGitHubSync();
+      if (progressChanged) {
+        book.updatedAt = Date.now();
+        book.progressUpdatedAt = book.updatedAt;
+        scheduleGitHubSync();
+      }
       $("#chapter-title").textContent = chapter.label;
       $("#chapter-select").value = chapter.href;
       $("#chapter-counter").textContent = `${String(activeEpubChapter + 1).padStart(2, "0")} / ${String(epubChapters.length).padStart(2, "0")}`;
@@ -397,7 +414,7 @@ async function showEpub(book) {
       $("#progress-fill").style.width = `${Math.round(percent * 100)}%`;
       $("#progress-percent").textContent = `${Math.round(percent * 100)}%`;
       $("#progress-chapter").textContent = chapter.label;
-      saveBook(book);
+      if (progressChanged) saveBook(book);
       const card = $(`#collection-grid [data-book-id="${CSS.escape(book.id)}"]`);
       if (card) {
         const progressBar = card.closest(".collection-card")?.querySelector(".collection-progress i");
@@ -519,12 +536,12 @@ async function importBackup(file) {
 function resumeGitHubSync() {
   if (document.visibilityState === "hidden") return;
   if (!localStorage.getItem(GITHUB_REPO_KEY) || !localStorage.getItem(GITHUB_TOKEN_KEY)) return;
-  if (Date.now() - lastAutoSyncAttempt < 5000) return;
+  if (Date.now() - lastAutoSyncAttempt < 3000) return;
   lastAutoSyncAttempt = Date.now();
   syncToGitHub({ automatic: true });
 }
 
-function scheduleGitHubSync(delay = 10000) {
+function scheduleGitHubSync(delay = 3000) {
   clearTimeout(syncDebounceTimer);
   syncDebounceTimer = setTimeout(() => syncToGitHub({ automatic: true }), delay);
 }
@@ -669,6 +686,8 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (!automatic) notify("仓库格式应为 owner/repository");
     return;
   }
+  clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = null;
   syncInProgress = true;
   const runId = ++syncRunId;
   localStorage.setItem(GITHUB_REPO_KEY, repository);
@@ -720,6 +739,7 @@ async function syncToGitHub({ automatic = false } = {}) {
           if (!remoteContentRead) throw new Error(`云端缺少《${remote.title}》的书籍文件`);
           if (await contentHash(remoteContentRead.value) !== remote.contentHash) throw new Error(`《${remote.title}》的云端内容校验失败`);
           chosen = { ...local, ...remoteContentRead.value, contentHash: remote.contentHash, contentUpdatedAt: remote.contentUpdatedAt };
+          delete chosen.locations;
           fileSha = remoteContentRead.sha;
         }
       }
@@ -767,12 +787,15 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (willRetry) {
       manifestConflictRetries += 1;
       syncPending = true;
+    } else {
+      manifestConflictRetries = 0;
     }
     $("#sync-feedback").textContent = willRetry ? "云端清单刚有更新，正在重新同步…" : isConflict ? "云端清单持续更新，请稍后重试同步" : error.message;
     if (willRetry) {
       $("#local-status").textContent = "正在重新同步到 GitHub";
     } else if (automatic) {
       $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
+      notify(`同步失败：${isConflict ? "云端清单持续更新，请稍后重试" : error.message}`);
     } else {
       notify(isConflict ? "云端清单持续更新，请稍后重试同步" : error.message);
     }
@@ -781,7 +804,7 @@ async function syncToGitHub({ automatic = false } = {}) {
       syncInProgress = false;
       if (syncPending) {
         syncPending = false;
-        scheduleGitHubSync(manifestConflictRetries ? 1000 : 10000);
+        scheduleGitHubSync(manifestConflictRetries ? 1000 : 3000);
       }
     }
   }
@@ -796,10 +819,12 @@ function bindEvents() {
   });
   window.addEventListener("pageshow", resumeGitHubSync);
   window.addEventListener("online", resumeGitHubSync);
-  $(".brand").addEventListener("click", (event) => {
+  $(".brand").addEventListener("click", async (event) => {
     event.preventDefault();
-    saveTextProgress(true);
+    const returningFromReader = !$(".reader-stage").hidden;
+    await saveTextProgress(true);
     setView("library");
+    if (returningFromReader) syncToGitHub({ automatic: true });
   });
   $("#file-input").addEventListener("change", (event) => importFiles(event.target.files).catch((error) => notify(error.message)).finally(() => { event.target.value = ""; }));
   $("#backup-input").addEventListener("change", (event) => { const file = event.target.files[0]; if (file) importBackup(file).catch((error) => notify(error.message)).finally(() => { event.target.value = ""; }); });
@@ -837,9 +862,11 @@ function bindEvents() {
     $("#settings-dialog").close();
     notify("本机书架已清空");
   });
-  document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
-    saveTextProgress(true);
+  document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", async () => {
+    const returningFromReader = button.dataset.view === "library" && !$(".reader-stage").hidden;
+    await saveTextProgress(true);
     setView(button.dataset.view);
+    if (returningFromReader) syncToGitHub({ automatic: true });
     if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
   }));
 }
