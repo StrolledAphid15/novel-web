@@ -961,12 +961,34 @@ async function readGitHubJson(path, branch, { onProgress } = {}) {
   let response = await githubRequest(path, branch, { allowMissing: true });
   if (!response) return null;
   let file = JSON.parse(await readResponseText(response, onProgress));
-  if (file.encoding !== "base64" || !file.content) {
-    response = await githubRequest(path, branch, { raw: true });
-    file = { content: await readResponseText(response, onProgress), sha: file.sha };
-    return { value: decodeBackup(file.content), sha: file.sha };
+  if (file.encoding === "base64" && file.content) {
+    return { value: decodeBackup(decodeGitHubContent(file.content)), sha: file.sha };
   }
-  return { value: decodeBackup(decodeGitHubContent(file.content)), sha: file.sha };
+  if (file.git_url) {
+    const blobResponse = await fetch(file.git_url, {
+      headers: {
+        Authorization: `Bearer ${githubToken}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    });
+    if (!blobResponse.ok) throw new Error(`GitHub 请求失败 (${blobResponse.status})`);
+    const blob = JSON.parse(await readResponseText(blobResponse, onProgress));
+    if (blob.encoding === "base64" && blob.content) {
+      return { value: decodeBackup(decodeGitHubContent(blob.content)), sha: file.sha };
+    }
+  }
+  response = await githubRequest(path, branch, { raw: true });
+  const rawText = await readResponseText(response, onProgress);
+  try {
+    const rawFile = JSON.parse(rawText);
+    if (rawFile.encoding === "base64" && rawFile.content) {
+      return { value: decodeBackup(decodeGitHubContent(rawFile.content)), sha: file.sha };
+    }
+  } catch {
+    // The raw endpoint normally returns the JSON document directly.
+  }
+  return { value: decodeBackup(rawText), sha: file.sha };
 }
 
 async function writeGitHubJson(path, value, branch, sha = null) {
