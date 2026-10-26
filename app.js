@@ -360,23 +360,47 @@ async function removeBook(id) {
 }
 
 async function downloadCloudBook(id) {
-  const descriptor = cloudDescriptor(id);
-  if (!descriptor) throw new Error("云端书籍目录中没有这本书");
-  if (isLocalBook(id)) {
-    await selectBook(id);
-    return;
-  }
   const repository = githubRepository();
   const token = localStorage.getItem(GITHUB_TOKEN_KEY) || "";
   const branch = localStorage.getItem(GITHUB_BRANCH_KEY) || "main";
   if (!repository || !token) throw new Error("请先在同步设置中连接 GitHub");
   githubToken = token;
+  let descriptor = cloudDescriptor(id);
+  if (!descriptor) throw new Error("云端书籍目录中没有这本书");
+  if (isLocalBook(id)) {
+    await selectBook(id);
+    return;
+  }
   $("#local-status").textContent = `正在下载《${descriptor.title}》`;
   setCloudDownloadProgress(id, 0);
   try {
+    const manifestRead = await readGitHubJson(GITHUB_MANIFEST_PATH, branch);
+    const freshDescriptor = manifestRead?.value?.books?.find((book) => book.id === id);
+    if (manifestRead?.value && !freshDescriptor) throw new Error(`《${descriptor.title}》已从云端书库删除，请重新同步目录`);
+    if (freshDescriptor) {
+      descriptor = freshDescriptor;
+      cloudCatalog = { ...cloudCatalog, ...manifestRead.value };
+      saveCloudCatalog();
+      renderCloudCollection();
+      setCloudDownloadProgress(id, 0);
+    }
     const contentRead = await readGitHubJson(`sync/books/${id}.json`, branch, { onProgress: (progress) => setCloudDownloadProgress(id, progress) });
     if (!contentRead) throw new Error(`云端缺少《${descriptor.title}》的书籍文件`);
-    if (await contentHash(contentRead.value) !== descriptor.contentHash) throw new Error(`《${descriptor.title}》的云端内容校验失败`);
+    const actualHash = await contentHash(contentRead.value);
+    if (actualHash !== descriptor.contentHash) {
+      if (!isCloudContent(contentRead.value)) throw new Error(`《${descriptor.title}》的云端内容校验失败`);
+      descriptor = { ...descriptor, contentHash: actualHash };
+      cloudCatalog = { ...cloudCatalog, books: cloudCatalog.books.map((book) => book.id === id ? descriptor : book) };
+      saveCloudCatalog();
+      if (manifestRead?.value && manifestRead.sha) {
+        const repairedManifest = { ...manifestRead.value, books: manifestRead.value.books.map((book) => book.id === id ? { ...book, contentHash: actualHash } : book) };
+        try {
+          await writeGitHubJson(GITHUB_MANIFEST_PATH, repairedManifest, branch, manifestRead.sha);
+        } catch (error) {
+          if (!error.isConflict) throw error;
+        }
+      }
+    }
     const book = { ...descriptor, ...contentRead.value, fileSha: contentRead.sha };
     delete book.fileSha;
     await saveBook(book);
@@ -843,6 +867,10 @@ function cloudContent(book) {
   return book.format === "epub" ? { format: "epub", data: book.data } : { format: "text", chapters: book.chapters };
 }
 
+function isCloudContent(value) {
+  return Boolean(value && ((value.format === "text" && Array.isArray(value.chapters)) || (value.format === "epub" && value.data instanceof ArrayBuffer)));
+}
+
 async function contentHash(content) {
   const bytes = new TextEncoder().encode(encodeBackup(content));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -1091,12 +1119,13 @@ async function syncToGitHub({ automatic = false } = {}) {
         } else {
           const remoteContentRead = await readGitHubJson(path, branch);
           if (!remoteContentRead) throw new Error(`云端缺少《${remote.title}》的书籍文件`);
-          if (await contentHash(remoteContentRead.value) !== remote.contentHash) throw new Error(`《${remote.title}》的云端内容校验失败`);
-          chosen = { ...local, ...remoteContentRead.value, contentHash: remote.contentHash, contentUpdatedAt: remote.contentUpdatedAt };
+          const remoteContentHash = await contentHash(remoteContentRead.value);
+          if (remoteContentHash !== remote.contentHash && !isCloudContent(remoteContentRead.value)) throw new Error(`《${remote.title}》的云端内容校验失败`);
+          chosen = { ...local, ...remoteContentRead.value, contentHash: remoteContentHash, contentUpdatedAt: remote.contentUpdatedAt };
           delete chosen.locations;
           fileSha = remoteContentRead.sha;
           nextLocalBooks.set(id, chosen);
-          mergedBooks.set(id, { ...remote, fileSha });
+          mergedBooks.set(id, { ...remote, contentHash: remoteContentHash, fileSha });
         }
       } else {
         const merged = mergeDescriptor(local, remote);

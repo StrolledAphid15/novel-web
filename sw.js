@@ -1,5 +1,5 @@
-const CACHE_NAME = "yejian-shell-v21";
-const APP_FILES = ["./", "./index.html", "./styles.css", "./app.js?v=1.6.0", "./manifest.webmanifest", "./icon.svg", "./fonts/FZFWZHUZGDLMCJW.TTF"];
+const CACHE_NAME = "yejian-shell-v22";
+const APP_FILES = ["./", "./index.html", "./styles.css", "./app.js?v=1.7.0", "./manifest.webmanifest", "./icon.svg", "./fonts/FZFWZHUZGDLMCJW.TTF"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_FILES)));
