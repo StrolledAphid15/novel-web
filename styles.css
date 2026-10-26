@@ -37,7 +37,8 @@ button { cursor: pointer; }
 .icon-button { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777a72; font-size: 20px; }
 .icon-button:hover, .tool-button:hover, .chapter-arrow:hover { background: #edeee9; color: #345342; }
 .icon-button.small { width: 26px; height: 26px; font-size: 17px; }
-.book-list { min-height: 0; flex: 1; display: grid; align-content: start; gap: 3px; overflow: auto; }
+.book-list { min-height: 0; max-height: 45vh; flex: 0 1 auto; display: grid; align-content: start; gap: 3px; overflow: auto; }
+.book-list:empty { display: none; }
 .book-row { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 8px; border: 0; border-radius: 5px; background: transparent; color: #62665e; font-size: 12px; text-align: left; }
 .book-row:hover, .book-row.active { background: #e8ebe5; color: #364d40; }
 .book-mini-cover { display: grid; width: 29px; height: 38px; flex: none; place-items: center; border-radius: 2px; background: #dce3d9; color: #526958; font: 500 15px "Noto Serif SC", serif; }
