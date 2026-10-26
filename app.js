@@ -30,6 +30,8 @@ let activeChapter = 0;
 let fontSize = Number(localStorage.getItem("yejian-font-size")) || 18;
 let activeTheme = localStorage.getItem("yejian-theme") || "paper";
 let epubBook = null;
+let epubBookId = null;
+let epubBookContentVersion = null;
 let epubRendition = null;
 let epubChapters = [];
 let activeEpubChapter = 0;
@@ -150,7 +152,7 @@ function openBookEditor(id) {
 async function removeBook(id) {
   const book = books.find((item) => item.id === id);
   if (!book || !confirm(`删除《${book.title}》及其书籍文件和阅读进度？此操作无法撤销。`)) return;
-  if (id === activeBookId) saveTextProgress(true);
+  if (id === activeBookId) await saveTextProgress(true);
   await deleteBook(id);
   const deleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
   localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify([...new Set([...deleted, id])]));
@@ -158,13 +160,14 @@ async function removeBook(id) {
   if (id === activeBookId) {
     epubRendition?.destroy();
     epubRendition = epubBook = null;
+    epubBookId = epubBookContentVersion = null;
     epubChapters = [];
     activeBookId = books[0]?.id || sampleBook.id;
     if (!books.length) {
       await saveBook(sampleBook);
       books = [sampleBook];
     }
-    await selectBook(activeBookId);
+    await selectBook(activeBookId, { persistCurrent: false });
   }
   renderShelf();
   renderCollection();
@@ -322,8 +325,8 @@ function setFontSize(size, sync = true) {
   if (epubRendition) epubRendition.themes.fontSize(`${fontSize}px`);
 }
 
-async function selectBook(id) {
-  saveTextProgress(true);
+async function selectBook(id, { persistCurrent = true } = {}) {
+  if (persistCurrent) await saveTextProgress(true);
   activeBookId = id;
   localStorage.setItem(ACTIVE_BOOK_KEY, id);
   const book = activeBook();
@@ -336,7 +339,7 @@ async function selectBook(id) {
     return;
   }
   if (epubRendition) epubRendition.destroy();
-  epubBook = epubRendition = null;
+  epubRendition = null;
   epubChapters = [];
   renderTextChapter(Number(book.progress) || 0, false);
   if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
@@ -359,13 +362,18 @@ async function showEpub(book) {
   try {
     if (!window.JSZip || !window.ePub) throw new Error("EPUB 阅读组件未加载，请检查网络后刷新页面。");
     await new Promise(requestAnimationFrame);
-    epubBook = ePub(book.data);
-    await epubBook.ready;
-    if (book.locations) epubBook.locations.load(book.locations);
-    else {
-      await epubBook.locations.generate(1000);
-      book.locations = epubBook.locations.save();
-      await saveBook(book);
+    const contentVersion = book.contentUpdatedAt || book.updatedAt || book.addedAt || 0;
+    if (epubBookId !== book.id || epubBookContentVersion !== contentVersion) {
+      epubBook = ePub(book.data);
+      epubBookId = book.id;
+      epubBookContentVersion = contentVersion;
+      await epubBook.ready;
+      if (book.locations) epubBook.locations.load(book.locations);
+      else {
+        await epubBook.locations.generate(1000);
+        book.locations = epubBook.locations.save();
+        await saveBook(book);
+      }
     }
     const [navigation, metadata] = await Promise.all([
       epubBook.loaded.navigation.catch(() => ({ toc: [] })),
@@ -391,6 +399,7 @@ async function showEpub(book) {
       "body, body *": { "font-family": "'YeJianReading', serif !important" }
     });
     epubRendition.themes.fontSize(`${fontSize}px`);
+    let initializingDisplay = true;
     const updateLocation = (location) => {
       const href = (location.start.href || "").split("#")[0];
       const spineHref = spineItems[location.start.index]?.href;
@@ -403,7 +412,7 @@ async function showEpub(book) {
       if (progressChanged) {
         book.updatedAt = Date.now();
         book.progressUpdatedAt = book.updatedAt;
-        scheduleGitHubSync();
+        if (!initializingDisplay) scheduleGitHubSync();
       }
       $("#chapter-title").textContent = chapter.label;
       $("#chapter-select").value = chapter.href;
@@ -427,12 +436,14 @@ async function showEpub(book) {
     await epubRendition.display(book.cfi || epubChapters[0].href);
     const current = epubRendition.currentLocation();
     if (current?.start) updateLocation(current);
+    initializingDisplay = false;
     $("#crumb-title").textContent = book.title;
     $("#reader-scroll").scrollTop = 0;
     if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
   } catch (error) {
     epubRendition?.destroy();
     epubRendition = epubBook = null;
+    epubBookId = epubBookContentVersion = null;
     epubChapters = [];
     $("#epub-host").hidden = true;
     $("#text-page").hidden = false;
@@ -710,7 +721,11 @@ async function syncToGitHub({ automatic = false } = {}) {
     const remoteBooks = new Map((cloudManifest?.books || []).map((book) => [book.id, book]));
     const tombstones = new Map((cloudManifest?.deleted || []).map((item) => [item.id, item.deletedAt]));
     const localDeleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
-    localDeleted.forEach((id) => tombstones.set(id, Math.max(tombstones.get(id) || 0, Date.now())));
+    localDeleted.forEach((id) => {
+      const remote = remoteBooks.get(id);
+      const remoteUpdatedAt = remote?.updatedAt || remote?.addedAt || 0;
+      tombstones.set(id, Math.max(tombstones.get(id) || 0, Date.now(), remoteUpdatedAt + 1));
+    });
     const mergedBooks = new Map();
 
     for (const [id, local] of localBooks) {
@@ -769,7 +784,11 @@ async function syncToGitHub({ automatic = false } = {}) {
       manifest.updatedAt = Date.now();
       await writeGitHubJson(GITHUB_MANIFEST_PATH, manifest, branch, manifestRead?.sha || null);
     }
-    localStorage.removeItem(DELETED_BOOKS_KEY);
+    const pendingDeleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
+    const syncedDeleted = new Set(localDeleted);
+    const remainingDeleted = pendingDeleted.filter((id) => !syncedDeleted.has(id));
+    if (remainingDeleted.length) localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify(remainingDeleted));
+    else localStorage.removeItem(DELETED_BOOKS_KEY);
     manifestConflictRetries = 0;
     $("#sync-feedback").textContent = `已同步 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
     $("#local-status").textContent = "已连接 GitHub";
