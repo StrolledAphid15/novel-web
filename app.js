@@ -10,6 +10,8 @@ const ACTIVE_BOOK_KEY = "yejian-active-book-id";
 const READERS_KEY = "yejian-readers-v1";
 const ACTIVE_READER_KEY = "yejian-active-reader";
 const CLOUD_CATALOG_KEY = "yejian-cloud-catalog-v1";
+const SYNC_LOCK_KEY = "yejian-github-sync-lock";
+const SYNC_LOCK_TTL = 30000;
 const READER_DEFAULTS = [{ id: "reader-a", name: "纨絔" }, { id: "reader-b", name: "澪" }];
 const READING_FIELDS = ["progress", "scrollProgress", "cfi", "progressUpdatedAt", "lastOpenedAt"];
 
@@ -54,6 +56,41 @@ let syncPending = false;
 let manifestConflictRetries = 0;
 let syncRunId = 0;
 let lastAutoSyncAttempt = 0;
+let syncRetryDelay = 1000;
+let syncLockTimer = null;
+const syncOwner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+function acquireSyncLock() {
+  const now = Date.now();
+  try {
+    const current = JSON.parse(localStorage.getItem(SYNC_LOCK_KEY) || "null");
+    if (current?.owner !== syncOwner && current?.updatedAt && now - current.updatedAt < SYNC_LOCK_TTL) return false;
+    localStorage.setItem(SYNC_LOCK_KEY, JSON.stringify({ owner: syncOwner, updatedAt: now }));
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+function refreshSyncLock() {
+  try {
+    const current = JSON.parse(localStorage.getItem(SYNC_LOCK_KEY) || "null");
+    if (current?.owner === syncOwner) localStorage.setItem(SYNC_LOCK_KEY, JSON.stringify({ owner: syncOwner, updatedAt: Date.now() }));
+  } catch {
+    // A failed heartbeat must not interrupt an active sync.
+  }
+}
+
+function releaseSyncLock() {
+  clearInterval(syncLockTimer);
+  syncLockTimer = null;
+  try {
+    const current = JSON.parse(localStorage.getItem(SYNC_LOCK_KEY) || "null");
+    if (current?.owner === syncOwner) localStorage.removeItem(SYNC_LOCK_KEY);
+  } catch {
+    // The TTL will release a lock if localStorage is unavailable.
+  }
+}
 
 function emptyReader({ id, name }) {
   return { id, name, nameUpdatedAt: 0, settings: { fontSize: 18, theme: "paper" }, settingsUpdatedAt: 0, activeBookId: "", activeBookUpdatedAt: 0, books: {} };
@@ -819,10 +856,12 @@ async function githubRequest(path, branch, options = {}) {
   if (!response.ok) {
     if (response.status === 401) localStorage.removeItem(GITHUB_TOKEN_KEY);
     const detail = await response.text();
-    const error = new Error((response.status === 409 || response.status === 422) && /sha|conflict|reference|fast.forward/i.test(detail)
+    const isConflict = response.status === 409 || (response.status === 422 && /sha|conflict|reference|fast.forward/i.test(detail));
+    const error = new Error(isConflict
       ? "GitHub 仓库刚被另一台设备更新，请重新同步"
       : `GitHub 请求失败 (${response.status})${detail ? `：${detail.slice(0, 180)}` : ""}`);
     error.status = response.status;
+    error.isConflict = isConflict;
     throw error;
   }
   return response;
@@ -954,9 +993,16 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (!automatic) notify("仓库格式应为 owner/repository");
     return;
   }
+  if (!acquireSyncLock()) {
+    syncPending = true;
+    $("#sync-feedback").textContent = "本机另一个页面正在同步…";
+    scheduleGitHubSync(5000);
+    return;
+  }
   clearTimeout(syncDebounceTimer);
   syncDebounceTimer = null;
   syncInProgress = true;
+  syncLockTimer = setInterval(refreshSyncLock, 5000);
   const runId = ++syncRunId;
   localStorage.setItem(GITHUB_REPO_KEY, repository);
   localStorage.setItem(GITHUB_BRANCH_KEY, branch);
@@ -1085,6 +1131,7 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (remainingDeleted.length) localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify(remainingDeleted));
     else localStorage.removeItem(DELETED_BOOKS_KEY);
     manifestConflictRetries = 0;
+    syncRetryDelay = 1000;
     $("#sync-feedback").textContent = `已同步 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
     $("#local-status").textContent = "已连接 GitHub";
     renderShelf();
@@ -1097,30 +1144,33 @@ async function syncToGitHub({ automatic = false } = {}) {
     }
   } catch (error) {
     if (runId !== syncRunId) return;
-    const isConflict = error.status === 409 || error.status === 422;
-    const willRetry = isConflict && manifestConflictRetries < 5;
+    const isConflict = Boolean(error.isConflict);
+    const willRetry = isConflict;
     if (willRetry) {
       manifestConflictRetries += 1;
       syncPending = true;
+      syncRetryDelay = Math.min(30000, Math.max(1000, syncRetryDelay * 2));
     } else {
       manifestConflictRetries = 0;
+      syncRetryDelay = 1000;
     }
-    $("#sync-feedback").textContent = willRetry ? "云端清单刚有更新，正在重新同步…" : isConflict ? "云端清单持续更新，请稍后重试同步" : error.message;
+    $("#sync-feedback").textContent = willRetry ? `检测到云端更新，${Math.round(syncRetryDelay / 1000)} 秒后重新合并（第 ${manifestConflictRetries} 次）` : error.message;
     if (willRetry) {
       $("#local-status").textContent = "正在重新同步到 GitHub";
     } else if (automatic) {
       $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
-      notify(`同步失败：${isConflict ? "云端清单持续更新，请稍后重试" : error.message}`);
+      notify(`同步失败：${error.message}`);
     } else {
-      notify(isConflict ? "云端清单持续更新，请稍后重试同步" : error.message);
+      notify(error.message);
     }
   } finally {
     if (runId === syncRunId) {
       syncInProgress = false;
       if (syncPending) {
         syncPending = false;
-        scheduleGitHubSync(manifestConflictRetries ? 1000 : 3000);
+        scheduleGitHubSync(manifestConflictRetries ? syncRetryDelay : 3000);
       }
+      releaseSyncLock();
     }
   }
 }
