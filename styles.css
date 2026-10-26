@@ -99,6 +99,7 @@ button { cursor: pointer; }
 .collection-author { overflow: hidden; margin-top: 5px; color: #999b93; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .cloud-book-status { margin-top: 12px; color: #78917b; font-size: 10px; }
 .cloud-card .collection-progress { margin-top: 9px; }
+.cloud-card .cloud-book-delete { color: #9a766c; }
 .cloud-download-overlay { position: absolute; inset: 0; display: grid; place-items: center; border-radius: inherit; background: #2f383280; }
 .cloud-download-overlay[hidden] { display: none; }
 .download-ring { display: grid; width: 43px; height: 43px; place-items: center; border-radius: 50%; background: conic-gradient(#fff var(--download-progress, 25%), #ffffff66 0); color: #fff; font: 10px "DM Mono", monospace; transform: rotate(-45deg); }

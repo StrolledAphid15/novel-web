@@ -58,6 +58,7 @@ let syncRunId = 0;
 let lastAutoSyncAttempt = 0;
 let syncRetryDelay = 1000;
 let syncLockTimer = null;
+let lastSyncSucceeded = null;
 const syncOwner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 function acquireSyncLock() {
@@ -316,9 +317,10 @@ function renderCloudCollection() {
     const format = book.format === "epub" ? "EPUB" : book.title.match(/\.md$/i) ? "MD" : "TXT";
     const local = isLocalBook(book.id);
     const action = local ? "已在本机" : "下载到本机";
-    return `<article class="collection-card cloud-card"><button class="collection-open cloud-book-open" data-book-id="${safeText(book.id)}" aria-label="${local ? "打开" : "下载并打开"}：${safeText(book.title)}"><span class="collection-cover"><span>${safeText(book.title.slice(0, 1))}</span><small>${format}</small><span class="cloud-download-overlay" hidden><span class="download-ring"><span>0%</span></span></span></span><span class="collection-card-copy"><strong>${safeText(book.title)}</strong><span class="collection-author">${safeText(book.author || "未知作者")}</span><span class="cloud-book-status">${action}</span><span class="collection-progress"><span><i style="width:${Math.min(100, percent)}%"></i></span><small>${percent}%</small></span></span></button></article>`;
+    return `<article class="collection-card cloud-card"><button class="collection-open cloud-book-open" data-book-id="${safeText(book.id)}" aria-label="${local ? "打开" : "下载并打开"}：${safeText(book.title)}"><span class="collection-cover"><span>${safeText(book.title.slice(0, 1))}</span><small>${format}</small><span class="cloud-download-overlay" hidden><span class="download-ring"><span>0%</span></span></span></span><span class="collection-card-copy"><strong>${safeText(book.title)}</strong><span class="collection-author">${safeText(book.author || "未知作者")}</span><span class="cloud-book-status">${action}</span><span class="collection-progress"><span><i style="width:${Math.min(100, percent)}%"></i></span><small>${percent}%</small></span></span></button><span class="collection-card-actions"><button class="text-button cloud-book-delete" data-book-id="${safeText(book.id)}">删除云端</button></span></article>`;
   }).join("");
   $("#cloud-collection-grid").querySelectorAll(".cloud-book-open").forEach((button) => button.addEventListener("click", () => downloadCloudBook(button.dataset.bookId).catch((error) => notify(error.message))));
+  $("#cloud-collection-grid").querySelectorAll(".cloud-book-delete").forEach((button) => button.addEventListener("click", () => removeCloudBook(button.dataset.bookId).catch((error) => notify(error.message))));
 }
 
 function openBookEditor(id) {
@@ -387,6 +389,30 @@ async function downloadCloudBook(id) {
     $("#local-status").textContent = "已连接 GitHub";
     renderCloudCollection();
   }
+}
+
+async function waitForSyncIdle(timeout = 60000) {
+  const startedAt = Date.now();
+  while (syncInProgress) {
+    if (Date.now() - startedAt > timeout) throw new Error("当前同步仍在进行，请稍后再删除云端书籍");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function removeCloudBook(id) {
+  const descriptor = cloudDescriptor(id);
+  if (!descriptor) throw new Error("云端书籍目录中没有这本书");
+  if (!confirm(`从共享云端书库永久删除《${descriptor.title}》？\n\n这会删除云端书籍文件，并从所有设备移除这本书，同时删除两位读者对应的阅读记录。`)) return;
+  if (!githubRepository() || !localStorage.getItem(GITHUB_TOKEN_KEY)) throw new Error("请先在同步设置中连接 GitHub");
+  const deleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
+  localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify([...new Set([...deleted, id])]));
+  clearTimeout(syncDebounceTimer);
+  notify(`正在从云端删除《${descriptor.title}》…`);
+  await waitForSyncIdle();
+  const synced = await syncToGitHub({ automatic: true });
+  setView("cloud");
+  if (!synced || cloudCatalog.books.some((book) => book.id === id)) throw new Error("云端删除未完成，请稍后重试");
+  notify(`《${descriptor.title}》已从云端删除`);
 }
 
 function setCloudDownloadProgress(id, progress) {
@@ -981,27 +1007,28 @@ async function syncReaders(branch, remoteReaders, revision, removedIds) {
 }
 
 async function syncToGitHub({ automatic = false } = {}) {
-  if (syncInProgress) { syncPending = syncPending || automatic; return; }
+  if (syncInProgress) { syncPending = syncPending || automatic; return false; }
   const repository = (automatic ? localStorage.getItem(GITHUB_REPO_KEY) || "" : $("#github-repository").value).trim();
   const token = (automatic ? localStorage.getItem(GITHUB_TOKEN_KEY) || "" : $("#github-token").value).trim();
   const branch = (automatic ? localStorage.getItem(GITHUB_BRANCH_KEY) || "main" : $("#github-branch").value || "main").trim();
   if (!repository || !token) {
     if (!automatic) notify("请填写 GitHub 仓库和访问令牌");
-    return;
+    return false;
   }
   if (!/^[^/]+\/[^/]+$/.test(repository)) {
     if (!automatic) notify("仓库格式应为 owner/repository");
-    return;
+    return false;
   }
   if (!acquireSyncLock()) {
     syncPending = true;
     $("#sync-feedback").textContent = "本机另一个页面正在同步…";
     scheduleGitHubSync(5000);
-    return;
+    return false;
   }
   clearTimeout(syncDebounceTimer);
   syncDebounceTimer = null;
   syncInProgress = true;
+  lastSyncSucceeded = null;
   syncLockTimer = setInterval(refreshSyncLock, 5000);
   const runId = ++syncRunId;
   localStorage.setItem(GITHUB_REPO_KEY, repository);
@@ -1011,7 +1038,7 @@ async function syncToGitHub({ automatic = false } = {}) {
   $("#sync-feedback").textContent = automatic ? "正在自动同步…" : "正在连接 GitHub…";
   try {
     await saveTextProgress(true);
-    if (runId !== syncRunId) return;
+    if (runId !== syncRunId) return false;
     $("#sync-feedback").textContent = "正在核对书架…";
     const manifestRead = await readGitHubJson(GITHUB_MANIFEST_PATH, branch);
     let cloudManifest = manifestRead?.value || null;
@@ -1084,14 +1111,14 @@ async function syncToGitHub({ automatic = false } = {}) {
 
     const syncedBooks = [...mergedBooks.values()];
     const syncedLocalBooks = [...nextLocalBooks.values()];
-    if (revision !== libraryRevision) { syncPending = true; return; }
+    if (revision !== libraryRevision) { syncPending = true; return false; }
     for (const [id] of tombstones) {
       const remote = remoteBooks.get(id);
       if (remote?.fileSha) await deleteGitHubFile(`sync/books/${id}.json`, branch, remote.fileSha);
     }
     const removedIds = new Set([...tombstones.keys()].filter((id) => !mergedBooks.has(id)));
     await syncReaders(branch, remoteReaders, revision, removedIds);
-    if (revision !== libraryRevision) { syncPending = true; return; }
+    if (revision !== libraryRevision) { syncPending = true; return false; }
     for (const reader of Object.values(readers)) {
       for (const id of Object.keys(reader.books)) {
         if (tombstones.has(id) && !mergedBooks.has(id)) delete reader.books[id];
@@ -1111,7 +1138,7 @@ async function syncToGitHub({ automatic = false } = {}) {
     }
     cloudCatalog = { ...manifest, updatedAt: manifest.updatedAt || cloudManifest?.updatedAt || Date.now() };
     saveCloudCatalog();
-    if (revision !== libraryRevision) { syncPending = true; return; }
+    if (revision !== libraryRevision) { syncPending = true; return false; }
     const previousBook = activeBook();
     await replaceBooks(syncedLocalBooks);
     if (revision !== libraryRevision) { syncPending = true; return; }
@@ -1142,8 +1169,10 @@ async function syncToGitHub({ automatic = false } = {}) {
       renderCollection();
       notify("书架已同步到 GitHub");
     }
+    lastSyncSucceeded = true;
+    return true;
   } catch (error) {
-    if (runId !== syncRunId) return;
+    if (runId !== syncRunId) return false;
     const isConflict = Boolean(error.isConflict);
     const willRetry = isConflict;
     if (willRetry) {
@@ -1163,6 +1192,8 @@ async function syncToGitHub({ automatic = false } = {}) {
     } else {
       notify(error.message);
     }
+    lastSyncSucceeded = false;
+    return false;
   } finally {
     if (runId === syncRunId) {
       syncInProgress = false;
