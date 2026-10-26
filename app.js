@@ -232,9 +232,9 @@ function saveTextProgress(immediate = false) {
   clearTimeout(textProgressSaveTimer);
   if (immediate) {
     textProgressSaveTimer = null;
-    saveBook(book);
+    const saved = saveBook(book);
     scheduleGitHubSync();
-    return;
+    return saved;
   }
   textProgressSaveTimer = setTimeout(() => {
     textProgressSaveTimer = null;
@@ -273,7 +273,6 @@ function renderTextChapter(index, save = true) {
     scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight) * scrollProgress;
   };
   requestAnimationFrame(restorePosition);
-  document.fonts?.ready?.then(restorePosition);
   $("#crumb-title").textContent = book.title;
   $("#reading-state").textContent = "正在阅读";
   if (save) {
@@ -516,9 +515,9 @@ function resumeGitHubSync() {
   syncToGitHub({ automatic: true });
 }
 
-function scheduleGitHubSync() {
+function scheduleGitHubSync(delay = 10000) {
   clearTimeout(syncDebounceTimer);
-  syncDebounceTimer = setTimeout(() => syncToGitHub({ automatic: true }), 10000);
+  syncDebounceTimer = setTimeout(() => syncToGitHub({ automatic: true }), delay);
 }
 
 function moveChapter(offset) {
@@ -577,8 +576,11 @@ async function githubRequest(path, branch, options = {}) {
   if (!response.ok) {
     if (response.status === 401) localStorage.removeItem(GITHUB_TOKEN_KEY);
     const detail = await response.text();
-    if ((response.status === 409 || response.status === 422) && /sha|conflict|reference/i.test(detail)) throw new Error("GitHub 仓库刚被另一台设备更新，请重新同步");
-    throw new Error(`GitHub 请求失败 (${response.status})${detail ? `：${detail.slice(0, 180)}` : ""}`);
+    const error = new Error((response.status === 409 || response.status === 422) && /sha|conflict|reference|fast.forward/i.test(detail)
+      ? "GitHub 仓库刚被另一台设备更新，请重新同步"
+      : `GitHub 请求失败 (${response.status})${detail ? `：${detail.slice(0, 180)}` : ""}`);
+    error.status = response.status;
+    throw error;
   }
   return response;
 }
@@ -666,6 +668,7 @@ async function syncToGitHub({ automatic = false } = {}) {
   githubToken = token;
   $("#sync-feedback").textContent = automatic ? "正在自动同步…" : "正在连接 GitHub…";
   try {
+    if (!automatic) await saveTextProgress(true);
     if (runId !== syncRunId) return;
     $("#sync-feedback").textContent = "正在核对书架…";
     const manifestRead = await readGitHubJson(GITHUB_MANIFEST_PATH, branch);
@@ -691,8 +694,13 @@ async function syncToGitHub({ automatic = false } = {}) {
       let fileSha = remote?.fileSha || null;
       const path = `sync/books/${id}.json`;
       if (!remote) {
-        const saved = await writeGitHubJson(path, cloudContent(local), branch);
-        fileSha = saved.content.sha;
+        const existing = await readGitHubJson(path, branch);
+        if (existing && await contentHash(existing.value) === localHash) {
+          fileSha = existing.sha;
+        } else {
+          const saved = await writeGitHubJson(path, cloudContent(local), branch, existing?.sha || null);
+          fileSha = saved.content.sha;
+        }
       } else if (remote.contentHash !== localHash) {
         const localContentAt = local.contentUpdatedAt || local.addedAt || local.updatedAt || 0;
         if (localContentAt >= (remote.contentUpdatedAt || 0)) {
@@ -745,7 +753,7 @@ async function syncToGitHub({ automatic = false } = {}) {
     }
   } catch (error) {
     if (runId !== syncRunId) return;
-    if (error.message.startsWith("GitHub 仓库刚被另一台设备更新") && manifestConflictRetries < 1) {
+    if ((error.status === 409 || error.status === 422) && manifestConflictRetries < 2) {
       manifestConflictRetries += 1;
       syncPending = true;
     }
@@ -760,7 +768,7 @@ async function syncToGitHub({ automatic = false } = {}) {
       syncInProgress = false;
       if (syncPending) {
         syncPending = false;
-        scheduleGitHubSync();
+        scheduleGitHubSync(manifestConflictRetries ? 1000 : 10000);
       }
     }
   }

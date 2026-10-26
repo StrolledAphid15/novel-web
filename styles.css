@@ -37,7 +37,7 @@ button { cursor: pointer; }
 .icon-button { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777a72; font-size: 20px; }
 .icon-button:hover, .tool-button:hover, .chapter-arrow:hover { background: #edeee9; color: #345342; }
 .icon-button.small { width: 26px; height: 26px; font-size: 17px; }
-.book-list { display: grid; gap: 3px; overflow: auto; }
+.book-list { min-height: 0; flex: 1; display: grid; align-content: start; gap: 3px; overflow: auto; }
 .book-row { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 8px; border: 0; border-radius: 5px; background: transparent; color: #62665e; font-size: 12px; text-align: left; }
 .book-row:hover, .book-row.active { background: #e8ebe5; color: #364d40; }
 .book-mini-cover { display: grid; width: 29px; height: 38px; flex: none; place-items: center; border-radius: 2px; background: #dce3d9; color: #526958; font: 500 15px "Noto Serif SC", serif; }
@@ -106,10 +106,10 @@ button { cursor: pointer; }
 .font-size-value { min-width: 15px; color: var(--reader-muted); font: 10px "DM Mono", monospace; text-align: center; }
 .theme-swatch { width: 15px; height: 15px; padding: 0; border: 1px solid #50504626; border-radius: 50%; }
 .theme-swatch.selected { outline: 1px solid #79877b; outline-offset: 2px; }
-.theme-paper { background: #fafaf7; }
-.theme-warm { background: #e9e0ce; }
-.theme-night { background: #343b37; }
-.reader-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; scrollbar-color: #c4c8bf transparent; scrollbar-width: thin; }
+.theme-swatch.theme-paper { background: #fafaf7; }
+.theme-swatch.theme-warm { background: #e9e0ce; }
+.theme-swatch.theme-night { background: #343b37; }
+.reader-scroll { height: 0; min-height: 0; flex: 1 1 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; scrollbar-color: #c4c8bf transparent; scrollbar-width: thin; }
 .reading-page { max-width: 696px; margin: 0 auto; padding: 69px 40px 22px; color: var(--reader-ink); }
 .book-kicker { display: flex; align-items: center; gap: 9px; color: var(--reader-muted); font-size: 10px; }
 .kicker-line { width: 18px; height: 1px; background: currentColor; }
