@@ -667,13 +667,15 @@ async function deleteGitHubFile(path, branch, sha) {
 }
 
 function bookDescriptor(book, contentHash, fileSha) {
+  const addedAt = Number(book.addedAt || 0);
+  const updatedAt = Number(book.updatedAt || addedAt);
   return {
     id: book.id, title: book.title, author: book.author || "", format: book.format,
-    addedAt: book.addedAt || Date.now(), updatedAt: book.updatedAt || Date.now(),
-    metadataUpdatedAt: book.metadataUpdatedAt || book.addedAt || book.updatedAt || Date.now(),
-    contentUpdatedAt: book.contentUpdatedAt || book.addedAt || book.updatedAt || Date.now(),
+    addedAt, updatedAt,
+    metadataUpdatedAt: book.metadataUpdatedAt || addedAt || updatedAt,
+    contentUpdatedAt: book.contentUpdatedAt || addedAt || updatedAt,
     progress: book.progress || 0, scrollProgress: book.scrollProgress || 0, cfi: book.cfi || "",
-    progressUpdatedAt: book.progressUpdatedAt || book.updatedAt || book.addedAt || Date.now(),
+    progressUpdatedAt: book.progressUpdatedAt || updatedAt || addedAt,
     lastOpenedAt: book.lastOpenedAt || 0, contentHash, fileSha
   };
 }
@@ -681,7 +683,7 @@ function bookDescriptor(book, contentHash, fileSha) {
 function mergeDescriptor(local, remote) {
   const metadata = (remote.metadataUpdatedAt || 0) > (local.metadataUpdatedAt || 0) ? remote : local;
   const progress = (remote.progressUpdatedAt || 0) > (local.progressUpdatedAt || 0) ? remote : local;
-  return { ...local, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || Date.now(), remote.addedAt || Date.now()), metadataUpdatedAt: metadata.metadataUpdatedAt, progress: progress.progress, scrollProgress: progress.scrollProgress, cfi: progress.cfi, progressUpdatedAt: progress.progressUpdatedAt, lastOpenedAt: Math.max(local.lastOpenedAt || 0, remote.lastOpenedAt || 0) };
+  return { ...local, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || local.updatedAt || 0, remote.addedAt || remote.updatedAt || 0), metadataUpdatedAt: metadata.metadataUpdatedAt, progress: progress.progress, scrollProgress: progress.scrollProgress, cfi: progress.cfi, progressUpdatedAt: progress.progressUpdatedAt, lastOpenedAt: Math.max(local.lastOpenedAt || 0, remote.lastOpenedAt || 0) };
 }
 
 async function syncToGitHub({ automatic = false } = {}) {
@@ -777,7 +779,7 @@ async function syncToGitHub({ automatic = false } = {}) {
       const remote = remoteBooks.get(id);
       if (remote?.fileSha) await deleteGitHubFile(`sync/books/${id}.json`, branch, remote.fileSha);
     }
-    const manifest = { version: 2, updatedAt: cloudManifest?.updatedAt || 0, settingsUpdatedAt: Number(localStorage.getItem(SETTINGS_UPDATED_KEY) || Date.now()), settings: { fontSize, theme: activeTheme }, books: syncedBooks.map((book) => bookDescriptor(book, book.contentHash, book.fileSha)), deleted: [...tombstones].map(([id, deletedAt]) => ({ id, deletedAt })) };
+    const manifest = { version: 2, updatedAt: cloudManifest?.updatedAt || 0, settingsUpdatedAt: Number(localStorage.getItem(SETTINGS_UPDATED_KEY) || cloudManifest?.settingsUpdatedAt || 0), settings: { fontSize, theme: activeTheme }, books: syncedBooks.map((book) => bookDescriptor(book, book.contentHash, book.fileSha)), deleted: [...tombstones].map(([id, deletedAt]) => ({ id, deletedAt })) };
     const { updatedAt: ignoredUpdatedAt, ...manifestState } = manifest;
     const { updatedAt: ignoredCloudUpdatedAt, ...cloudManifestState } = cloudManifest || {};
     if (!cloudManifest || JSON.stringify(manifestState) !== JSON.stringify(cloudManifestState)) {
