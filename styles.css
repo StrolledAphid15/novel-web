@@ -32,8 +32,6 @@ button { cursor: pointer; }
 .nav-count { margin-left: auto; color: #92958c; font: 12px "DM Mono", monospace; }
 .shelf-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 24px; }
 .shelf-heading .side-label { margin: 0 0 9px; }
-.shelf-search { height: 32px; margin: 2px 0 8px; padding: 0 9px; border: 1px solid #e4e6e0; border-radius: 4px; outline-color: #799181; background: #f8f9f6; color: #454942; font-size: 11px; }
-.shelf-search::placeholder { color: #a1a39b; }
 .icon-button { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777a72; font-size: 20px; }
 .icon-button:hover, .tool-button:hover, .chapter-arrow:hover { background: #edeee9; color: #345342; }
 .icon-button.small { width: 26px; height: 26px; font-size: 17px; }

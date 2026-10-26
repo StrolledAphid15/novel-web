@@ -108,10 +108,8 @@ function safeText(value) {
 }
 
 function renderShelf() {
-  const query = $("#book-search").value.trim().toLocaleLowerCase();
   const visibleBooks = [...books]
-    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
-    .filter((book) => `${book.title} ${book.author || ""}`.toLocaleLowerCase().includes(query));
+    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
   $("#book-count").textContent = visibleBooks.length;
   $("#book-list").innerHTML = visibleBooks.map((book) => `<button class="book-row ${book.id === activeBookId ? "active" : ""}" data-book-id="${safeText(book.id)}"><span class="book-mini-cover">${safeText(book.title.slice(0, 1))}</span><span class="book-row-copy"><span class="book-row-title">${safeText(book.title)}</span><span class="book-row-author">${safeText(book.author || "未知作者")}</span></span></button>`).join("");
   $("#book-list").querySelectorAll("[data-book-id]").forEach((row) => row.addEventListener("click", () => selectBook(row.dataset.bookId)));
@@ -804,7 +802,6 @@ function bindEvents() {
   $("#next-chapter").addEventListener("click", () => moveChapter(1));
   $("#mobile-menu").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
   $("#reader-scroll").addEventListener("scroll", () => saveTextProgress(), { passive: true });
-  $("#book-search").addEventListener("input", renderShelf);
   $("#collection-search").addEventListener("input", renderCollection);
   $("#collection-import").addEventListener("click", () => $("#file-input").click());
   $("#collection-empty-import").addEventListener("click", () => $("#file-input").click());
