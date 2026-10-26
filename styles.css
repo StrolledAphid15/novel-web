@@ -1,3 +1,9 @@
+@font-face {
+  font-family: "YeJianReading";
+  src: url("./fonts/FZFWZHUZGDLMCJW.TTF") format("truetype");
+  font-display: swap;
+}
+
 :root {
   font-family: "Noto Sans SC", sans-serif;
   color: #262824;
@@ -9,6 +15,7 @@
   --reader-ink: #373833;
   --reader-muted: #88897f;
   --reader-rule: #e9e8e0;
+  --reading-font: "YeJianReading", serif;
   --app-height: 100vh;
 }
 
@@ -112,10 +119,10 @@ button { cursor: pointer; }
 .reading-page { max-width: 696px; margin: 0 auto; padding: 69px 40px 22px; color: var(--reader-ink); }
 .book-kicker { display: flex; align-items: center; gap: 9px; color: var(--reader-muted); font-size: 10px; }
 .kicker-line { width: 18px; height: 1px; background: currentColor; }
-.chapter-title { margin: 20px 0 7px; color: var(--reader-ink); font: 500 27px/1.5 "Noto Serif SC", serif; }
+.chapter-title { margin: 20px 0 7px; color: var(--reader-ink); font: 500 27px/1.5 var(--reading-font); }
 .chapter-meta { display: flex; align-items: center; gap: 9px; color: var(--reader-muted); font-size: 11px; }
 .meta-dot { color: #bbbcb4; font-size: 10px; }
-.prose { margin-top: 36px; color: var(--reader-ink); font: 400 18px/2.12 "Noto Serif SC", serif; white-space: pre-line; }
+.prose { margin-top: 36px; color: var(--reader-ink); font: 400 18px/2.12 var(--reading-font); white-space: pre-line; }
 .prose p { margin: 0 0 16px; text-indent: 2em; }
 .prose p:first-child { text-indent: 0; }
 .chapter-end { margin: 37px 0 30px; color: var(--reader-muted); font: 11px "DM Mono", monospace; text-align: center; }

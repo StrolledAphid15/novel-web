@@ -352,6 +352,7 @@ async function showEpub(book) {
     await new Promise(requestAnimationFrame);
     epubBook = ePub(book.data);
     await epubBook.ready;
+    await epubBook.locations.generate(1000);
     const [navigation, metadata] = await Promise.all([
       epubBook.loaded.navigation.catch(() => ({ toc: [] })),
       epubBook.loaded.metadata.catch(() => ({}))
@@ -371,14 +372,17 @@ async function showEpub(book) {
     $("#prev-chapter").disabled = true;
     $("#next-chapter").disabled = epubChapters.length < 2;
     epubRendition = epubBook.renderTo("epub-host", { manager: "default", width: "100%", height: "100%", flow: "scrolled-doc" });
-    epubRendition.themes.default({ body: { "font-family": "'Noto Serif SC', serif !important", "line-height": "2 !important", padding: "18px !important" } });
+    epubRendition.themes.default({
+      body: { "line-height": "2 !important", padding: "18px !important" },
+      "body, body *": { "font-family": "'YeJianReading', serif !important" }
+    });
     epubRendition.themes.fontSize(`${fontSize}px`);
     const updateLocation = (location) => {
       const href = (location.start.href || "").split("#")[0];
       const spineHref = spineItems[location.start.index]?.href;
       const chapter = epubChapters.find((item) => item.href.split("#")[0] === href) || epubChapters.find((item) => item.href.split("#")[0] === spineHref) || epubChapters[0];
       activeEpubChapter = epubChapters.indexOf(chapter);
-      const percent = location.start.percentage || 0;
+      const percent = epubBook.locations.percentageFromCfi(location.start.cfi) || 0;
       book.cfi = location.start.cfi;
       book.progress = percent;
       book.updatedAt = Date.now();
@@ -394,6 +398,13 @@ async function showEpub(book) {
       $("#progress-percent").textContent = `${Math.round(percent * 100)}%`;
       $("#progress-chapter").textContent = chapter.label;
       saveBook(book);
+      const card = $(`#collection-grid [data-book-id="${CSS.escape(book.id)}"]`);
+      if (card) {
+        const progressBar = card.closest(".collection-card")?.querySelector(".collection-progress i");
+        const progressLabel = card.closest(".collection-card")?.querySelector(".collection-progress small");
+        if (progressBar) progressBar.style.width = `${Math.min(100, Math.round(percent * 100))}%`;
+        if (progressLabel) progressLabel.textContent = `${Math.round(percent * 100)}%`;
+      }
     };
     epubRendition.on("relocated", updateLocation);
     await epubRendition.display(book.cfi || epubChapters[0].href);
