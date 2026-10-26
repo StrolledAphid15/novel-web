@@ -751,15 +751,19 @@ async function syncToGitHub({ automatic = false } = {}) {
     }
   } catch (error) {
     if (runId !== syncRunId) return;
-    if ((error.status === 409 || error.status === 422) && manifestConflictRetries < 2) {
+    const isConflict = error.status === 409 || error.status === 422;
+    const willRetry = isConflict && manifestConflictRetries < 5;
+    if (willRetry) {
       manifestConflictRetries += 1;
       syncPending = true;
     }
-    $("#sync-feedback").textContent = error.message;
-    if (automatic) {
+    $("#sync-feedback").textContent = willRetry ? "云端清单刚有更新，正在重新同步…" : isConflict ? "云端清单持续更新，请稍后重试同步" : error.message;
+    if (willRetry) {
+      $("#local-status").textContent = "正在重新同步到 GitHub";
+    } else if (automatic) {
       $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
     } else {
-      notify(error.message);
+      notify(isConflict ? "云端清单持续更新，请稍后重试同步" : error.message);
     }
   } finally {
     if (runId === syncRunId) {
