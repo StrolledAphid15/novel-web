@@ -23,16 +23,16 @@
         <div class="side-label">个人空间</div>
         <nav class="side-nav" aria-label="主导航">
           <button class="nav-item active" data-view="library"><span class="nav-icon">▤</span>我的书架<span class="nav-count" id="book-count">1</span></button>
+          <button class="nav-item" data-view="cloud"><span class="nav-icon">☁</span>云端书库<span class="nav-count" id="cloud-book-count">0</span></button>
         </nav>
-        <div class="shelf-heading"><span class="side-label">书籍</span><button class="icon-button small" id="add-book-side" title="导入书籍" aria-label="导入书籍">＋</button></div>
-        <div class="book-list" id="book-list"></div>
+        <div class="sidebar-import"><button class="outline-button" id="add-book-side">＋ 导入书籍</button></div>
         <div class="sidebar-bottom"><span class="sync-dot"></span><span id="local-status">仅保存在此设备</span></div>
       </aside>
 
       <main class="main-area">
         <header class="topbar">
-          <div class="breadcrumbs"><button class="mobile-menu icon-button" id="mobile-menu" aria-label="打开书架">☰</button><span>我的书架</span><span class="crumb-divider">/</span><span class="crumb-current" id="crumb-title">雾港来信</span></div>
-          <div class="top-actions"><button class="subtle-button" id="sync-open"><span class="sync-icon">⟳</span><span class="sync-label">同步</span></button></div>
+          <div class="breadcrumbs"><button class="mobile-menu icon-button" id="mobile-menu" aria-label="打开导航">☰</button><span id="view-title">我的书架</span><span class="crumb-divider">/</span><span class="crumb-current" id="crumb-title">共用书库</span></div>
+          <div class="top-actions"><label class="reader-picker"><span class="sr-only">当前读者</span><select id="reader-select" aria-label="当前读者"><option value="reader-a">纨絔</option><option value="reader-b">澪</option></select></label><button class="subtle-button" id="sync-open"><span class="sync-icon">⟳</span><span class="sync-label">同步</span></button></div>
         </header>
 
         <section class="collection-view" id="collection-view" hidden>
@@ -40,6 +40,13 @@
           <div class="collection-controls"><span id="collection-count">1 本书</span><input class="collection-search" id="collection-search" type="search" placeholder="搜索书名或作者" aria-label="搜索书名或作者" /></div>
           <div class="collection-grid" id="collection-grid"></div>
           <div class="collection-empty" id="collection-empty" hidden><span class="empty-mark">页</span><strong id="collection-empty-title">这里还没有书</strong><span id="collection-empty-copy">导入 TXT、Markdown 或 EPUB 开始阅读。</span><button class="outline-button" id="collection-empty-import">导入书籍</button></div>
+        </section>
+
+        <section class="collection-view cloud-collection-view" id="cloud-view" hidden>
+          <div class="collection-header"><div><span class="collection-eyebrow" id="cloud-collection-eyebrow">共用目录 · 云端</span><h1>云端书库</h1></div></div>
+          <div class="collection-controls"><span id="cloud-collection-count">0 本书</span><input class="collection-search" id="cloud-search" type="search" placeholder="搜索书名或作者" aria-label="搜索云端书名或作者" /></div>
+          <div class="collection-grid" id="cloud-collection-grid"></div>
+          <div class="collection-empty" id="cloud-collection-empty" hidden><span class="empty-mark">☁</span><strong>还没有云端书籍</strong><span>连接 GitHub 并同步，或先导入书籍。</span></div>
         </section>
 
         <section class="reader-stage">
@@ -77,11 +84,12 @@
     <dialog class="settings-dialog" id="settings-dialog">
       <form method="dialog" class="dialog-head"><div><span class="dialog-eyebrow">偏好设置</span><h2>阅读与同步</h2></div><button class="icon-button" aria-label="关闭">×</button></form>
       <div class="dialog-body">
-        <section class="settings-section"><div class="settings-section-title">本地备份</div><p>导出书架、阅读进度和设置，保存为一个 JSON 文件。</p><div class="settings-actions"><button class="outline-button" id="export-backup">导出备份</button><button class="outline-button" id="import-backup">导入备份</button></div></section>
-        <section class="settings-section"><div class="settings-section-title">GitHub</div><p>书架清单和书籍文件会同步到私有仓库的 sync/ 目录。</p><label class="field-label" for="github-repository">私有仓库</label><input class="text-field" id="github-repository" placeholder="owner/novel-web-data" autocomplete="off" /><label class="field-label" for="github-branch">分支</label><input class="text-field" id="github-branch" value="main" autocomplete="off" /><label class="field-label" for="github-token">Fine-grained personal access token</label><input class="text-field" id="github-token" type="password" placeholder="github_pat_…" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="github-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">为专用私有仓库创建 Fine-grained token，仅授予 Contents 读写权限。令牌保存在此浏览器并可被页面脚本读取；不要写入源码或提交到仓库。</div></section>
-        <section class="settings-section final-section"><div class="settings-section-title">书籍导入</div><p>支持 TXT、Markdown 和 EPUB。书籍文件保存在当前浏览器的本地数据库中。</p><button class="outline-button" id="import-books">导入书籍</button></section>
+        <section class="settings-section"><div class="settings-section-title">读者档案</div><p>在页面右上角切换读者。书库共用，阅读进度、最近阅读、字号和主题分别保存。档案无需密码。</p><label class="field-label" for="reader-name">当前读者名字</label><div class="settings-actions"><input class="text-field" id="reader-name" maxlength="20" autocomplete="off" /><button class="outline-button" id="rename-reader">保存名字</button></div></section>
+        <section class="settings-section"><div class="settings-section-title">本地备份</div><p>导出共用书库和两位读者的进度与设置，保存为一个 JSON 文件。导入会替换本机书库和两人的档案；旧版备份的记录归入纨絔。</p><div class="settings-actions"><button class="outline-button" id="export-backup">导出备份</button><button class="outline-button" id="import-backup">导入备份</button></div></section>
+        <section class="settings-section"><div class="settings-section-title">GitHub</div><p>云端书库目录和阅读记录会同步；书籍正文只在下载或本机已有书籍需要更新时传输。</p><label class="field-label" for="github-repository">私有仓库</label><input class="text-field" id="github-repository" placeholder="owner/novel-web-data" autocomplete="off" /><label class="field-label" for="github-branch">分支</label><input class="text-field" id="github-branch" value="main" autocomplete="off" /><label class="field-label" for="github-token">Fine-grained personal access token</label><input class="text-field" id="github-token" type="password" placeholder="github_pat_…" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="github-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">为专用私有仓库创建 Fine-grained token，仅授予 Contents 读写权限。令牌保存在此浏览器并可被页面脚本读取；不要写入源码或提交到仓库。</div></section>
+        <section class="settings-section final-section"><div class="settings-section-title">书籍导入</div><p>支持 TXT、Markdown 和 EPUB。导入的书籍只保存在当前设备，下一次同步后会出现在云端书库；其他设备需要点击云端书库中的书再下载。</p><button class="outline-button" id="import-books">导入书籍</button></section>
       </div>
-      <div class="dialog-footer"><span>页间 · 版本 1.1</span><button class="text-button" id="clear-library">清空本机书架</button></div>
+      <div class="dialog-footer"><span>页间 · 版本 1.4</span><button class="text-button" id="clear-library">移出本机书籍</button></div>
     </dialog>
 
     <dialog class="settings-dialog edit-book-dialog" id="edit-book-dialog">
@@ -92,12 +100,12 @@
           <label class="field-label" for="edit-book-title">书名</label><input class="text-field" id="edit-book-title" required maxlength="200" />
           <label class="field-label" for="edit-book-author">作者</label><input class="text-field" id="edit-book-author" maxlength="200" />
           <label class="field-label" for="replace-book-file">替换书籍文件</label><input class="text-field file-field" id="replace-book-file" type="file" accept=".txt,.md,.markdown,.epub" />
-          <div class="field-help">选择新文件后会替换当前书籍内容，并从头开始阅读；留空则只修改书名和作者。</div>
+          <div class="field-help">选择新文件后会替换共用书籍内容，并重置两位读者的阅读位置；留空则只修改共用的书名和作者。</div>
         </div>
         <div class="dialog-footer"><button class="outline-button" type="button" id="cancel-edit-book">取消</button><button class="primary-button" type="submit">保存</button></div>
       </form>
     </dialog>
 
-    <script src="./app.js?v=1.1.12" defer></script>
+    <script src="./app.js?v=1.4.0" defer></script>
   </body>
 </html>

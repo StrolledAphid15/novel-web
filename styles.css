@@ -39,6 +39,8 @@ button { cursor: pointer; }
 .nav-count { margin-left: auto; color: #92958c; font: 12px "DM Mono", monospace; }
 .shelf-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 24px; }
 .shelf-heading .side-label { margin: 0 0 9px; }
+.sidebar-import { margin-top: 24px; }
+.sidebar-import .outline-button { width: 100%; padding: 8px 10px; font-size: 11px; }
 .icon-button { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777a72; font-size: 20px; }
 .icon-button:hover, .tool-button:hover, .chapter-arrow:hover { background: #edeee9; color: #345342; }
 .icon-button.small { width: 26px; height: 26px; font-size: 17px; }
@@ -61,6 +63,12 @@ button { cursor: pointer; }
 .crumb-divider { color: #c7c8c1; }
 .crumb-current { color: #3b3e38; }
 .top-actions { display: flex; align-items: center; gap: 17px; }
+.reader-picker { flex: none; }
+.reader-picker select { max-width: 100px; padding: 5px 7px; border: 1px solid #dfe2da; border-radius: 4px; background: #f9f9f7; color: #486b5c; font-size: 12px; }
+.topbar .breadcrumbs { min-width: 0; overflow: hidden; }
+.crumb-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top-actions { flex: none; margin-left: 12px; }
+#rename-reader { flex: none; }
 .subtle-button { display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: #62665f; font-size: 12px; font-weight: 500; }
 .sync-icon { color: #708477; font-size: 18px; }
 .mobile-menu { display: none; }
@@ -81,7 +89,7 @@ button { cursor: pointer; }
 .collection-card-actions { display: flex; flex: none; gap: 5px; }
 .collection-card-actions .text-button { padding: 6px; color: #73776d; font-size: 10px; }
 .collection-card-actions .book-delete { color: #9a766c; }
-.collection-cover { display: flex; width: 61px; height: 82px; flex: none; flex-direction: column; align-items: center; justify-content: space-between; padding: 17px 5px 7px; border-radius: 3px; background: #dce3d9; color: #526958; box-shadow: inset -4px 0 #52695812; }
+.collection-cover { position: relative; display: flex; width: 61px; height: 82px; flex: none; flex-direction: column; align-items: center; justify-content: space-between; padding: 17px 5px 7px; border-radius: 3px; background: #dce3d9; color: #526958; box-shadow: inset -4px 0 #52695812; }
 .collection-card:nth-child(3n) .collection-cover { background: #e7ddd2; color: #856e57; }
 .collection-card:nth-child(3n + 1) .collection-cover { background: #dbe4e4; color: #58716c; }
 .collection-cover > span { font: 500 25px "Noto Serif SC", serif; }
@@ -89,6 +97,12 @@ button { cursor: pointer; }
 .collection-card-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .collection-card-copy strong { overflow: hidden; color: #373a35; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .collection-author { overflow: hidden; margin-top: 5px; color: #999b93; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-book-status { margin-top: 12px; color: #78917b; font-size: 10px; }
+.cloud-card .collection-progress { margin-top: 9px; }
+.cloud-download-overlay { position: absolute; inset: 0; display: grid; place-items: center; border-radius: inherit; background: #2f383280; }
+.cloud-download-overlay[hidden] { display: none; }
+.download-ring { display: grid; width: 43px; height: 43px; place-items: center; border-radius: 50%; background: conic-gradient(#fff var(--download-progress, 25%), #ffffff66 0); color: #fff; font: 10px "DM Mono", monospace; transform: rotate(-45deg); }
+.download-ring span { display: grid; width: 35px; height: 35px; place-items: center; border-radius: 50%; background: #3a443dcc; transform: rotate(45deg); }
 .collection-progress { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
 .collection-progress > span { height: 2px; flex: 1; background: #eceee8; }
 .collection-progress i { display: block; height: 100%; background: #78917b; }
