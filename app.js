@@ -4,6 +4,8 @@ const GITHUB_REPO_KEY = "yejian-github-repo";
 const GITHUB_BRANCH_KEY = "yejian-github-branch";
 const GITHUB_TOKEN_KEY = "yejian-github-token";
 const GITHUB_MANIFEST_PATH = "sync/library-manifest.json";
+const GITHUB_BOOKS_BRANCH = "sync-books";
+const READER_BRANCHES = { "reader-a": "sync-reader-a", "reader-b": "sync-reader-b" };
 const DELETED_BOOKS_KEY = "yejian-deleted-books";
 const SETTINGS_UPDATED_KEY = "yejian-settings-updated-at";
 const ACTIVE_BOOK_KEY = "yejian-active-book-id";
@@ -50,13 +52,10 @@ let epubChapters = [];
 let activeEpubChapter = 0;
 let githubToken = null;
 let toastTimer;
-let syncDebounceTimer = null;
 let syncInProgress = false;
 let syncPending = false;
 let manifestConflictRetries = 0;
 let syncRunId = 0;
-let lastAutoSyncAttempt = 0;
-let syncRetryDelay = 1000;
 let syncLockTimer = null;
 let lastSyncSucceeded = null;
 const syncOwner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -203,7 +202,6 @@ async function switchReader(id) {
     renderShelf();
     renderCollection();
     $("#crumb-title").textContent = "共用书库";
-    scheduleGitHubSync();
     notify(`已切换到${readers[id].name}`);
   } finally {
     switchingReader = false;
@@ -362,9 +360,10 @@ async function removeBook(id) {
 async function downloadCloudBook(id) {
   const repository = githubRepository();
   const token = localStorage.getItem(GITHUB_TOKEN_KEY) || "";
-  const branch = localStorage.getItem(GITHUB_BRANCH_KEY) || "main";
+  const branch = GITHUB_BOOKS_BRANCH;
   if (!repository || !token) throw new Error("请先在同步设置中连接 GitHub");
   githubToken = token;
+  await ensureGitHubBranch(branch, localStorage.getItem(GITHUB_BRANCH_KEY) || "main");
   let descriptor = cloudDescriptor(id);
   if (!descriptor) throw new Error("云端书籍目录中没有这本书");
   if (isLocalBook(id)) {
@@ -430,7 +429,6 @@ async function removeCloudBook(id) {
   if (!githubRepository() || !localStorage.getItem(GITHUB_TOKEN_KEY)) throw new Error("请先在同步设置中连接 GitHub");
   const deleted = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
   localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify([...new Set([...deleted, id])]));
-  clearTimeout(syncDebounceTimer);
   notify(`正在从云端删除《${descriptor.title}》…`);
   await waitForSyncIdle();
   const synced = await syncToGitHub({ automatic: true });
@@ -459,7 +457,7 @@ async function updateBook(event) {
   let replacement = null;
   if (file) {
     if (/\.epub$/i.test(file.name)) replacement = { format: "epub", data: await file.arrayBuffer() };
-    else if (/\.(txt|md|markdown)$/i.test(file.name)) replacement = { format: "text", chapters: splitIntoChapters(await file.text()) };
+    else if (/\.(txt|md|markdown)$/i.test(file.name)) replacement = { format: "text", chapters: await splitIntoChapters(decodeTextFile(await file.arrayBuffer())) };
     else { notify("请选择 TXT、Markdown 或 EPUB 文件"); return; }
     if (!replacement.chapters?.length && replacement.format === "text") { notify("文件中没有可导入的正文"); return; }
   }
@@ -489,7 +487,6 @@ async function updateBook(event) {
   renderShelf();
   renderCollection();
   if (id === activeBookId) await selectBook(id, { persistCurrent: false });
-  scheduleGitHubSync();
   notify(replacement ? "书籍信息和文件已更新" : "书籍信息已更新");
 }
 
@@ -500,6 +497,9 @@ function setView(view) {
   $("#collection-view").hidden = !inLibrary;
   $("#cloud-view").hidden = !inCloud;
   $(".reader-stage").hidden = inLibrary || inCloud;
+  const mainArea = document.querySelector(".main-area");
+  mainArea.classList.remove("theme-paper", "theme-warm", "theme-night");
+  if (!inLibrary && !inCloud) mainArea.classList.add(`theme-${activeTheme}`);
   $("#view-title").textContent = inCloud ? "云端书库" : inLibrary ? "我的书架" : "正在阅读";
   if (inLibrary) renderCollection();
   if (inCloud) renderCloudCollection();
@@ -520,7 +520,6 @@ function saveTextProgress(immediate = false) {
   const changed = (state.progress || 0) !== progress || (state.scrollProgress || 0) !== scrollProgress;
   if (changed) {
     updateReadingState(book, { progress, scrollProgress, progressUpdatedAt: Date.now() });
-    scheduleGitHubSync();
   }
 }
 
@@ -561,7 +560,6 @@ function renderTextChapter(index, save = true) {
   $("#reading-state").textContent = "正在阅读";
   if (save) {
     updateReadingState(book, { progress: activeChapter, scrollProgress: 0, progressUpdatedAt: Date.now() });
-    scheduleGitHubSync();
   }
 }
 
@@ -571,13 +569,17 @@ function setTheme(theme, sync = true) {
   const stage = document.querySelector(".reader-stage");
   stage.classList.remove("theme-paper", "theme-warm", "theme-night");
   stage.classList.add(`theme-${theme}`);
+  if (!$(".reader-stage").hidden) {
+    const mainArea = document.querySelector(".main-area");
+    mainArea.classList.remove("theme-paper", "theme-warm", "theme-night");
+    mainArea.classList.add(`theme-${theme}`);
+  }
   document.querySelectorAll(".theme-swatch").forEach((button) => button.classList.toggle("selected", button.dataset.theme === theme));
   document.querySelector("meta[name='theme-color']").content = theme === "night" ? "#222623" : theme === "warm" ? "#f4f0e7" : "#f7f7f4";
   if (sync) {
     readers[activeReaderId].settings.theme = theme;
     readers[activeReaderId].settingsUpdatedAt = Date.now();
     saveReaders();
-    scheduleGitHubSync();
   }
   const rendition = epubRendition;
   if (rendition) rendition.themes.default({ body: { color: theme === "night" ? "#dddcd2 !important" : theme === "warm" ? "#453d34 !important" : "#373833 !important", background: theme === "night" ? "#222623 !important" : theme === "warm" ? "#f4f0e7 !important" : "#fbfbf9 !important" } });
@@ -591,7 +593,6 @@ function setFontSize(size, sync = true) {
     readers[activeReaderId].settings.fontSize = fontSize;
     readers[activeReaderId].settingsUpdatedAt = Date.now();
     saveReaders();
-    scheduleGitHubSync();
   }
   if (epubRendition) epubRendition.themes.fontSize(`${fontSize}px`);
 }
@@ -605,7 +606,6 @@ async function selectBook(id, { persistCurrent = true } = {}) {
   readers[activeReaderId].activeBookId = book.id;
   readers[activeReaderId].activeBookUpdatedAt = Date.now();
   updateReadingState(book, { lastOpenedAt: Date.now() });
-  scheduleGitHubSync();
   renderShelf();
   setView("reader");
   if (book.format === "epub") {
@@ -677,9 +677,14 @@ async function showEpub(book) {
       body: { "line-height": "2 !important", padding: "18px !important" },
       "body, body *": { "font-family": "'YeJianReading', serif !important" }
     });
+    const readingFontUrl = new URL("./fonts/FZFWZHUZGDLMCJW.TTF", document.baseURI).href;
+    epubRendition.hooks.content.register((contents) => {
+      const style = contents.document.createElement("style");
+      style.textContent = `@font-face { font-family: "YeJianReading"; src: url("${readingFontUrl}") format("truetype"); font-style: normal; font-weight: 400; } body, body * { font-family: "YeJianReading", serif !important; }`;
+      (contents.document.head || contents.document.documentElement).append(style);
+    });
     epubRendition.themes.fontSize(`${fontSize}px`);
     setTheme(activeTheme, false);
-    let initializingDisplay = true;
     const updateLocation = (location) => {
       if (session !== readingSession || $(".reader-stage").hidden) return;
       const href = (location.start.href || "").split("#")[0];
@@ -691,7 +696,6 @@ async function showEpub(book) {
       const progressChanged = state.cfi !== location.start.cfi || state.progress !== percent;
       if (progressChanged) {
         updateReadingState(book, { cfi: location.start.cfi, progress: percent, progressUpdatedAt: Date.now() });
-        if (!initializingDisplay) scheduleGitHubSync();
       }
       $("#chapter-title").textContent = chapter.label;
       $("#chapter-select").value = chapter.href;
@@ -715,7 +719,6 @@ async function showEpub(book) {
     if (session !== readingSession) return;
     const current = epubRendition.currentLocation();
     if (current?.start) updateLocation(current);
-    initializingDisplay = false;
     $("#crumb-title").textContent = book.title;
     $("#reader-scroll").scrollTop = 0;
     if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
@@ -734,22 +737,40 @@ async function showEpub(book) {
   }
 }
 
-function splitIntoChapters(text) {
+function decodeTextFile(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    try {
+      return new TextDecoder("gb18030").decode(bytes);
+    } catch {
+      throw new Error("无法识别 TXT 文件编码，请将文件另存为 UTF-8 后重试");
+    }
+  }
+}
+
+async function splitIntoChapters(text) {
   const lines = text.replace(/\r/g, "").split("\n");
   const headings = /^(?:第[零〇一二三四五六七八九十百千万\d]+[章节回卷部篇].*|序章.*|楔子.*|序言.*|Chapter\s+\d+.*)$/i;
   const chapters = [];
   let current = { title: "正文", subtitle: "", paragraphs: [] };
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (headings.test(line) && (current.paragraphs.length || current.title !== "正文")) {
-      chapters.push(current);
-      current = { title: line, subtitle: "", paragraphs: [] };
-    } else if (headings.test(line) && current.title === "正文" && !current.paragraphs.length) {
-      current.title = line;
-    } else {
-      current.paragraphs.push(line);
+  for (let start = 0; start < lines.length; start += 2000) {
+    for (const raw of lines.slice(start, start + 2000)) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (headings.test(line) && (current.paragraphs.length || current.title !== "正文")) {
+        chapters.push(current);
+        current = { title: line, subtitle: "", paragraphs: [] };
+      } else if (headings.test(line) && current.title === "正文" && !current.paragraphs.length) {
+        current.title = line;
+      } else {
+        current.paragraphs.push(line);
+      }
     }
+    if (start + 2000 < lines.length) await new Promise(requestAnimationFrame);
   }
   if (current.paragraphs.length || !chapters.length) chapters.push(current);
   return chapters.filter((chapter) => chapter.paragraphs.length);
@@ -770,15 +791,14 @@ async function importFiles(fileList) {
       activeBookId = id;
       continue;
     }
-    const content = await file.text();
-    const chapters = splitIntoChapters(content);
+    const content = decodeTextFile(await file.arrayBuffer());
+    const chapters = await splitIntoChapters(content);
     await saveBook({ id, title, author: "", format: "text", chapters, addedAt: Date.now(), updatedAt: Date.now(), contentUpdatedAt: Date.now() });
     activeBookId = id;
   }
   books = await allBooks();
   renderShelf();
   await selectBook(activeBookId, { persistCurrent: false });
-  scheduleGitHubSync();
   if (fileList.length) notify(`已导入 ${fileList.length} 本书`);
 }
 
@@ -834,21 +854,7 @@ async function importBackup(file) {
   applyReader();
   renderShelf();
   renderCollection();
-  scheduleGitHubSync();
   notify("备份已导入");
-}
-
-function resumeGitHubSync() {
-  if (document.visibilityState === "hidden") return;
-  if (!localStorage.getItem(GITHUB_REPO_KEY) || !localStorage.getItem(GITHUB_TOKEN_KEY)) return;
-  if (Date.now() - lastAutoSyncAttempt < 3000) return;
-  lastAutoSyncAttempt = Date.now();
-  syncToGitHub({ automatic: true });
-}
-
-function scheduleGitHubSync(delay = 3000) {
-  clearTimeout(syncDebounceTimer);
-  syncDebounceTimer = setTimeout(() => syncToGitHub({ automatic: true }), delay);
 }
 
 function moveChapter(offset) {
@@ -894,6 +900,40 @@ function githubFileUrl(path, branch) {
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   const query = branch ? `?ref=${encodeURIComponent(branch)}` : "";
   return `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/${encodedPath}${query}`;
+}
+
+function githubRefUrl(ref) {
+  const [owner, name] = githubRepository().split("/");
+  const encodedRef = ["heads", ...ref.split("/")].map(encodeURIComponent).join("/");
+  return `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/git/ref/${encodedRef}`;
+}
+
+async function ensureGitHubBranch(branch, sourceBranch) {
+  const headers = {
+    Authorization: `Bearer ${githubToken}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json"
+  };
+  let response = await fetch(githubRefUrl(branch), { headers });
+  if (response.ok) return;
+  if (response.status !== 404) throw new Error(`读取 GitHub 分支失败 (${response.status})`);
+  const sourceResponse = await fetch(githubRefUrl(sourceBranch), { headers });
+  if (!sourceResponse.ok) throw new Error(`找不到用于初始化同步分支的基准分支“${sourceBranch}”`);
+  const source = await sourceResponse.json();
+  const [owner, name] = githubRepository().split("/");
+  response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/git/refs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: source.object.sha })
+  });
+  if (response.ok) return;
+  if (response.status === 422) {
+    const existing = await fetch(githubRefUrl(branch), { headers });
+    if (existing.ok) return;
+  }
+  const detail = await response.text();
+  throw new Error(`创建 GitHub 分支“${branch}”失败 (${response.status})${detail ? `：${detail.slice(0, 180)}` : ""}`);
 }
 
 async function githubRequest(path, branch, options = {}) {
@@ -1028,25 +1068,17 @@ function mergeDescriptor(local, remote) {
   return { ...local, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || local.updatedAt || 0, remote.addedAt || remote.updatedAt || 0), metadataUpdatedAt: metadata.metadataUpdatedAt };
 }
 
-async function syncReaders(branch, remoteReaders, revision, removedIds) {
-  const merged = {};
-  for (const { id } of READER_DEFAULTS) {
-    const remote = remoteReaders[id];
-    const snapshot = JSON.parse(JSON.stringify(mergeReader(readers[id], remote?.value)));
-    for (const bookId of removedIds) delete snapshot.books[bookId];
-    merged[id] = snapshot;
-    if (!remote || JSON.stringify(snapshot) !== JSON.stringify(mergeReader(emptyReader(READER_DEFAULTS.find((reader) => reader.id === id)), remote.value))) {
-      await writeGitHubJson(`sync/readers/${id}.json`, snapshot, branch, remote?.sha || null);
-    }
+async function syncReader(readerId, branch, remote, revision, removedIds) {
+  const snapshot = JSON.parse(JSON.stringify(mergeReader(readers[readerId], remote?.value)));
+  for (const bookId of removedIds) delete snapshot.books[bookId];
+  if (!remote || JSON.stringify(snapshot) !== JSON.stringify(mergeReader(emptyReader(READER_DEFAULTS.find((reader) => reader.id === readerId)), remote.value))) {
+    await writeGitHubJson(`sync/readers/${readerId}.json`, snapshot, branch, remote?.sha || null);
   }
   if (revision !== libraryRevision) { syncPending = true; return; }
   saveTextProgress(true);
   const before = JSON.stringify(readingState(activeBook()));
-  for (const { id } of READER_DEFAULTS) {
-    readers[id] = mergeReader(readers[id], merged[id]);
-    for (const bookId of removedIds) delete readers[id].books[bookId];
-    if (JSON.stringify(readers[id]) !== JSON.stringify(merged[id])) syncPending = true;
-  }
+  readers[readerId] = mergeReader(readers[readerId], snapshot);
+  for (const bookId of removedIds) delete readers[readerId].books[bookId];
   saveReaders();
   if (before !== JSON.stringify(readingState(activeBook())) && !$(".reader-stage").hidden && !removedIds.has(activeBookId)) {
     readingSession += 1;
@@ -1056,11 +1088,31 @@ async function syncReaders(branch, remoteReaders, revision, removedIds) {
   }
 }
 
+async function removeDeletedReaderStates(readerId, removedIds) {
+  if (!removedIds.size) return;
+  const branch = READER_BRANCHES[readerId];
+  const remote = await readGitHubJson(`sync/readers/${readerId}.json`, branch);
+  if (!remote) return;
+  const snapshot = mergeReader(readers[readerId], remote.value);
+  let changed = false;
+  for (const bookId of removedIds) {
+    if (Object.hasOwn(snapshot.books, bookId)) {
+      delete snapshot.books[bookId];
+      changed = true;
+    }
+  }
+  if (changed) await writeGitHubJson(`sync/readers/${readerId}.json`, snapshot, branch, remote.sha);
+  readers[readerId] = snapshot;
+}
+
 async function syncToGitHub({ automatic = false } = {}) {
   if (syncInProgress) { syncPending = syncPending || automatic; return false; }
   const repository = (automatic ? localStorage.getItem(GITHUB_REPO_KEY) || "" : $("#github-repository").value).trim();
   const token = (automatic ? localStorage.getItem(GITHUB_TOKEN_KEY) || "" : $("#github-token").value).trim();
-  const branch = (automatic ? localStorage.getItem(GITHUB_BRANCH_KEY) || "main" : $("#github-branch").value || "main").trim();
+  const sourceBranch = (automatic ? localStorage.getItem(GITHUB_BRANCH_KEY) || "main" : $("#github-branch").value || "main").trim();
+  const branch = GITHUB_BOOKS_BRANCH;
+  const readerId = activeReaderId;
+  const readerBranch = READER_BRANCHES[readerId];
   if (!repository || !token) {
     if (!automatic) notify("请填写 GitHub 仓库和访问令牌");
     return false;
@@ -1072,32 +1124,32 @@ async function syncToGitHub({ automatic = false } = {}) {
   if (!acquireSyncLock()) {
     syncPending = true;
     $("#sync-feedback").textContent = "本机另一个页面正在同步…";
-    scheduleGitHubSync(5000);
+    setTimeout(() => syncToGitHub({ automatic: true }), 2000);
     return false;
   }
-  clearTimeout(syncDebounceTimer);
-  syncDebounceTimer = null;
   syncInProgress = true;
   lastSyncSucceeded = null;
   syncLockTimer = setInterval(refreshSyncLock, 5000);
   const runId = ++syncRunId;
   localStorage.setItem(GITHUB_REPO_KEY, repository);
-  localStorage.setItem(GITHUB_BRANCH_KEY, branch);
+  localStorage.setItem(GITHUB_BRANCH_KEY, sourceBranch);
   localStorage.setItem(GITHUB_TOKEN_KEY, token);
   githubToken = token;
   $("#sync-feedback").textContent = automatic ? "正在自动同步…" : "正在连接 GitHub…";
   try {
     await saveTextProgress(true);
     if (runId !== syncRunId) return false;
+    await Promise.all([
+      ensureGitHubBranch(GITHUB_BOOKS_BRANCH, sourceBranch),
+      ...READER_DEFAULTS.map(({ id }) => ensureGitHubBranch(READER_BRANCHES[id], sourceBranch))
+    ]);
     $("#sync-feedback").textContent = "正在核对书架…";
     const manifestRead = await readGitHubJson(GITHUB_MANIFEST_PATH, branch);
     let cloudManifest = manifestRead?.value || null;
     if (cloudManifest && (cloudManifest.version || 1) < 3) {
       cloudManifest = { ...cloudManifest, books: migrateLegacyData(cloudManifest.books || [], cloudManifest.settings, cloudManifest.settingsUpdatedAt) };
     }
-    const remoteReaders = {};
-    const readerFiles = await Promise.all(READER_DEFAULTS.map(({ id }) => readGitHubJson(`sync/readers/${id}.json`, branch)));
-    READER_DEFAULTS.forEach(({ id }, index) => { remoteReaders[id] = readerFiles[index]; });
+    const remoteReader = await readGitHubJson(`sync/readers/${readerId}.json`, readerBranch);
     const revision = libraryRevision;
     const localBooks = new Map(books.map((book) => [book.id, { ...book }]));
     const remoteBooks = new Map((cloudManifest?.books || []).map((book) => [book.id, book]));
@@ -1168,7 +1220,10 @@ async function syncToGitHub({ automatic = false } = {}) {
       if (remote?.fileSha) await deleteGitHubFile(`sync/books/${id}.json`, branch, remote.fileSha);
     }
     const removedIds = new Set([...tombstones.keys()].filter((id) => !mergedBooks.has(id)));
-    await syncReaders(branch, remoteReaders, revision, removedIds);
+    await syncReader(readerId, readerBranch, remoteReader, revision, removedIds);
+    for (const { id } of READER_DEFAULTS) {
+      if (id !== readerId) await removeDeletedReaderStates(id, removedIds);
+    }
     if (revision !== libraryRevision) { syncPending = true; return false; }
     for (const reader of Object.values(readers)) {
       for (const id of Object.keys(reader.books)) {
@@ -1209,7 +1264,6 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (remainingDeleted.length) localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify(remainingDeleted));
     else localStorage.removeItem(DELETED_BOOKS_KEY);
     manifestConflictRetries = 0;
-    syncRetryDelay = 1000;
     $("#sync-feedback").textContent = `已同步 · ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
     $("#local-status").textContent = "已连接 GitHub";
     renderShelf();
@@ -1229,12 +1283,10 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (willRetry) {
       manifestConflictRetries += 1;
       syncPending = true;
-      syncRetryDelay = Math.min(30000, Math.max(1000, syncRetryDelay * 2));
     } else {
       manifestConflictRetries = 0;
-      syncRetryDelay = 1000;
     }
-    $("#sync-feedback").textContent = willRetry ? `检测到云端更新，${Math.round(syncRetryDelay / 1000)} 秒后重新合并（第 ${manifestConflictRetries} 次）` : error.message;
+    $("#sync-feedback").textContent = willRetry ? `检测到云端更新，2 秒后重新合并（第 ${manifestConflictRetries} 次）` : error.message;
     if (willRetry) {
       $("#local-status").textContent = "正在重新同步到 GitHub";
     } else if (automatic) {
@@ -1250,7 +1302,7 @@ async function syncToGitHub({ automatic = false } = {}) {
       syncInProgress = false;
       if (syncPending) {
         syncPending = false;
-        scheduleGitHubSync(manifestConflictRetries ? syncRetryDelay : 3000);
+        setTimeout(() => syncToGitHub({ automatic: true }), 2000);
       }
       releaseSyncLock();
     }
@@ -1266,23 +1318,17 @@ function bindEvents() {
     readers[activeReaderId].nameUpdatedAt = Date.now();
     saveReaders();
     renderReaders();
-    scheduleGitHubSync();
     notify("读者名字已保存");
   });
   const persistReadingState = () => saveTextProgress(true);
   window.addEventListener("pagehide", persistReadingState);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") persistReadingState();
-    else resumeGitHubSync();
   });
-  window.addEventListener("pageshow", resumeGitHubSync);
-  window.addEventListener("online", resumeGitHubSync);
   $(".brand").addEventListener("click", async (event) => {
     event.preventDefault();
-    const returningFromReader = !$(".reader-stage").hidden;
     await saveTextProgress(true);
     setView("library");
-    if (returningFromReader) syncToGitHub({ automatic: true });
   });
   $("#file-input").addEventListener("change", (event) => importFiles(event.target.files).catch((error) => notify(error.message)).finally(() => { event.target.value = ""; }));
   $("#backup-input").addEventListener("change", (event) => { const file = event.target.files[0]; if (file) importBackup(file).catch((error) => notify(error.message)).finally(() => { event.target.value = ""; }); });
@@ -1321,16 +1367,13 @@ function bindEvents() {
     activeBookId = sampleBook.id;
     renderShelf();
     setView("library");
-    scheduleGitHubSync();
     $("#settings-dialog").close();
     renderCloudCollection();
     notify("已移出此设备上的书籍");
   });
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", async () => {
-    const returningFromReader = !$(".reader-stage").hidden;
     await saveTextProgress(true);
     setView(button.dataset.view);
-    if (returningFromReader) syncToGitHub({ automatic: true });
     if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
   }));
 }
@@ -1361,12 +1404,7 @@ async function init() {
   bindEvents();
   setView("library");
   $("#crumb-title").textContent = "共用书库";
-  const repository = localStorage.getItem(GITHUB_REPO_KEY);
-  const token = localStorage.getItem(GITHUB_TOKEN_KEY);
-  if (repository && token) {
-    githubToken = token;
-    resumeGitHubSync();
-  }
+  githubToken = localStorage.getItem(GITHUB_TOKEN_KEY);
 }
 
 init().catch((error) => notify(`阅读器启动失败：${error.message}`));

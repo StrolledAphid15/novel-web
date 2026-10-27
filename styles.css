@@ -58,19 +58,21 @@ button { cursor: pointer; }
 .sync-dot, .reading-indicator { width: 6px; height: 6px; flex: none; border-radius: 50%; background: #76a17f; }
 
 .main-area { display: flex; min-width: 0; min-height: 0; flex-direction: column; }
-.topbar { display: flex; height: 67px; flex: none; align-items: center; justify-content: space-between; padding: 0 36px; border-bottom: 1px solid #ebebe7; background: #f9f9f7; }
-.breadcrumbs { display: flex; align-items: center; gap: 11px; color: #85877f; font-size: 12px; }
+.topbar { display: flex; height: 67px; flex: none; align-items: center; justify-content: space-between; padding: 0 36px; border-bottom: 1px solid var(--topbar-rule, #ebebe7); background: var(--topbar-bg, #f9f9f7); }
+.main-area.theme-warm { --topbar-bg: #f4f0e7; --topbar-ink: #453d34; --topbar-muted: #918577; --topbar-rule: #e6dfd2; }
+.main-area.theme-night { --topbar-bg: #222623; --topbar-ink: #dddcd2; --topbar-muted: #92988e; --topbar-rule: #3c423d; }
+.breadcrumbs { display: flex; align-items: center; gap: 11px; color: var(--topbar-muted, #85877f); font-size: 12px; }
 .crumb-divider { color: #c7c8c1; }
-.crumb-current { color: #3b3e38; }
+.crumb-current { color: var(--topbar-ink, #3b3e38); }
 .top-actions { display: flex; align-items: center; gap: 17px; }
 .reader-picker { flex: none; }
-.reader-picker select { max-width: 100px; padding: 5px 7px; border: 1px solid #dfe2da; border-radius: 4px; background: #f9f9f7; color: #486b5c; font-size: 12px; }
+.reader-picker select { max-width: 100px; padding: 5px 7px; border: 1px solid var(--topbar-rule, #dfe2da); border-radius: 4px; background: var(--topbar-bg, #f9f9f7); color: var(--topbar-ink, #486b5c); font-size: 12px; }
 .topbar .breadcrumbs { min-width: 0; overflow: hidden; }
 .crumb-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .top-actions { flex: none; margin-left: 12px; }
 #rename-reader { flex: none; }
-.subtle-button { display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: #62665f; font-size: 12px; font-weight: 500; }
-.sync-icon { color: #708477; font-size: 18px; }
+.subtle-button { display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--topbar-ink, #62665f); font-size: 12px; font-weight: 500; }
+.sync-icon { color: var(--topbar-muted, #708477); font-size: 18px; }
 .mobile-menu { display: none; }
 
 .collection-view { min-height: 0; flex: 1; overflow-y: auto; padding: 42px clamp(22px, 5vw, 70px); background: #f8f8f5; }

@@ -86,7 +86,7 @@
       <div class="dialog-body">
         <section class="settings-section"><div class="settings-section-title">读者档案</div><p>在页面右上角切换读者。书库共用，阅读进度、最近阅读、字号和主题分别保存。档案无需密码。</p><label class="field-label" for="reader-name">当前读者名字</label><div class="settings-actions"><input class="text-field" id="reader-name" maxlength="20" autocomplete="off" /><button class="outline-button" id="rename-reader">保存名字</button></div></section>
         <section class="settings-section"><div class="settings-section-title">本地备份</div><p>导出共用书库和两位读者的进度与设置，保存为一个 JSON 文件。导入会替换本机书库和两人的档案；旧版备份的记录归入纨絔。</p><div class="settings-actions"><button class="outline-button" id="export-backup">导出备份</button><button class="outline-button" id="import-backup">导入备份</button></div></section>
-        <section class="settings-section"><div class="settings-section-title">GitHub</div><p>云端书库目录和阅读记录会同步；书籍正文只在下载或本机已有书籍需要更新时传输。</p><label class="field-label" for="github-repository">私有仓库</label><input class="text-field" id="github-repository" placeholder="owner/novel-web-data" autocomplete="off" /><label class="field-label" for="github-branch">分支</label><input class="text-field" id="github-branch" value="main" autocomplete="off" /><label class="field-label" for="github-token">Fine-grained personal access token</label><input class="text-field" id="github-token" type="password" placeholder="github_pat_…" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="github-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">为专用私有仓库创建 Fine-grained token，仅授予 Contents 读写权限。令牌保存在此浏览器并可被页面脚本读取；不要写入源码或提交到仓库。</div></section>
+        <section class="settings-section"><div class="settings-section-title">GitHub</div><p>书籍和两位读者的数据分别写入三个分支，减少不同数据更新之间的冲突。</p><label class="field-label" for="github-repository">私有仓库</label><input class="text-field" id="github-repository" placeholder="owner/novel-web-data" autocomplete="off" /><label class="field-label" for="github-branch">基准分支</label><input class="text-field" id="github-branch" value="main" autocomplete="off" /><div class="field-help">首次同步会从基准分支创建 sync-books、sync-reader-a 和 sync-reader-b，并继承已有数据。</div><label class="field-label" for="github-token">Fine-grained personal access token</label><input class="text-field" id="github-token" type="password" placeholder="github_pat_…" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="github-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">为专用私有仓库创建 Fine-grained token，仅授予 Contents 读写权限。令牌保存在此浏览器并可被页面脚本读取；不要写入源码或提交到仓库。</div></section>
         <section class="settings-section final-section"><div class="settings-section-title">书籍导入</div><p>支持 TXT、Markdown 和 EPUB。导入的书籍只保存在当前设备，下一次同步后会出现在云端书库；其他设备需要点击云端书库中的书再下载。</p><button class="outline-button" id="import-books">导入书籍</button></section>
       </div>
       <div class="dialog-footer"><span>页间 · 版本 1.7</span><button class="text-button" id="clear-library">移出本机书籍</button></div>
@@ -106,6 +106,6 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=1.7.0" defer></script>
+    <script src="./app.js?v=1.7.1" defer></script>
   </body>
 </html>
