@@ -6,6 +6,7 @@ const GITHUB_TOKEN_KEY = "yejian-github-token";
 const GITHUB_MANIFEST_PATH = "sync/library-manifest.json";
 const GITHUB_BOOKS_BRANCH = "sync-books";
 const READER_BRANCHES = { "reader-a": "sync-reader-a", "reader-b": "sync-reader-b" };
+const DEMO_BOOK_ID = "sample-mist-port";
 const DELETED_BOOKS_KEY = "yejian-deleted-books";
 const SETTINGS_UPDATED_KEY = "yejian-settings-updated-at";
 const ACTIVE_BOOK_KEY = "yejian-active-book-id";
@@ -17,24 +18,11 @@ const SYNC_LOCK_TTL = 30000;
 const READER_DEFAULTS = [{ id: "reader-a", name: "纨絔" }, { id: "reader-b", name: "澪" }];
 const READING_FIELDS = ["progress", "scrollProgress", "cfi", "progressUpdatedAt", "lastOpenedAt"];
 
-const sampleBook = {
-  id: "sample-mist-port",
-  title: "雾港来信",
-  author: "原创短篇 · 试读",
-  format: "text",
-  addedAt: 1,
-  chapters: [
-    { title: "第一章　雾起时分", subtitle: "一封寄错地址的信", paragraphs: ["林澄第一次见到那封信，是在一个雾很重的清晨。", "它躺在旧邮局门口的铁皮信箱里，信封被雨水洇开了一角。收信人的名字模糊得只剩一个“周”字，下面的地址却清清楚楚：雾港，北街十七号。", "这条街上没有十七号。至少，林澄在这里住了二十六年，从来没有见过。", "她把信翻过来，寄件人的一栏空着。纸页很轻，贴在指尖上，像一片刚从树上落下来的叶子。", "邮局里挂钟停在六点十二分。窗外，渡船的汽笛穿过雾传过来，比平时慢，也比平时远。", "林澄把信揣进口袋，推开邮局的门。她决定沿着北街走一遍。"] },
-    { title: "第二章　北街十七号", subtitle: "地图上没有的门牌", paragraphs: ["北街沿着海岸弯了一个很缓的弧，尽头是废弃的灯塔。清晨的铺面还没有开门，卷帘门上凝着一层细细的水珠。", "从一号数到十五号，接下来是一段被围墙截断的旧路。墙根长着青苔，里侧有一棵歪斜的山茶树。", "林澄在墙前停下时，信封里忽然传来一声轻响，像是有人在里面折了一下纸。", "她看见墙上有一道窄门。门牌钉得很低，上面写着十七。指腹碰到门环的瞬间，远处的渡船正好靠岸。", "门后没有院子，只有一条长长的走廊。走廊尽头亮着灯，灯下站着一个撑红伞的人。", "“你来得比信早。”那人说。林澄这才发现，自己手里的信已经拆开了。"] },
-    { title: "第三章　未寄出的信", subtitle: "雾散之后", paragraphs: ["信纸上只有一行字：如果你找到这里，请替我把门打开。", "字迹和林澄的笔迹一模一样，连那个总是写得太轻的“开”字，也一笔不差。", "她抬起头，红伞已经收了起来。门外的雾慢慢退到海面，露出熟悉的旧灯塔和一排潮湿的屋顶。", "邮局的钟重新走动，秒针越过六点十三分。", "林澄把信纸折好，放进口袋。北街十七号的门在身后轻轻合上。她沿着来时的路往回走，第一次觉得这座小城并不只有她知道的那些地方。", "远处汽笛再次响起。天气很好，渡船正等着出发。"] }
-  ]
-};
-
 const $ = (selector) => document.querySelector(selector);
 const dbPromise = openDatabase();
 let books = [];
 let cloudCatalog = { version: 3, updatedAt: 0, books: [], deleted: [] };
-let activeBookId = sampleBook.id;
+let activeBookId = "";
 let activeChapter = 0;
 let readers = {};
 let activeReaderId = READER_DEFAULTS.some((reader) => reader.id === localStorage.getItem(ACTIVE_READER_KEY)) ? localStorage.getItem(ACTIVE_READER_KEY) : "reader-a";
@@ -160,6 +148,7 @@ function migrateLegacyData(rows, settings, settingsUpdatedAt = 0, savedBookId = 
 }
 
 function readingState(book, readerId = activeReaderId) {
+  if (!book) return {};
   const state = readers[readerId].books[book.id];
   if (!state || (state.contentUpdatedAt || 0) < (book.contentUpdatedAt || book.addedAt || 0)) return {};
   return state;
@@ -174,7 +163,7 @@ function applyReader() {
   const reader = readers[activeReaderId];
   setTheme(["paper", "warm", "night"].includes(reader.settings.theme) ? reader.settings.theme : "paper", false);
   setFontSize(Number(reader.settings.fontSize) || 18, false);
-  activeBookId = books.find((book) => book.id === reader.activeBookId)?.id || books[0]?.id || sampleBook.id;
+  activeBookId = books.find((book) => book.id === reader.activeBookId)?.id || books[0]?.id || "";
   renderReaders();
 }
 
@@ -258,7 +247,7 @@ async function replaceBooks(rows) {
 }
 
 function activeBook() {
-  return books.find((book) => book.id === activeBookId) || books[0] || sampleBook;
+  return books.find((book) => book.id === activeBookId) || books[0] || null;
 }
 
 function notify(message) {
@@ -344,12 +333,9 @@ async function removeBook(id) {
     epubRendition = epubBook = null;
     epubBookId = epubBookContentVersion = null;
     epubChapters = [];
-    activeBookId = books[0]?.id || sampleBook.id;
-    if (!books.length) {
-      await saveBook(sampleBook);
-      books = [sampleBook];
-    }
-    await selectBook(activeBookId, { persistCurrent: false });
+    activeBookId = books[0]?.id || "";
+    if (activeBookId) await selectBook(activeBookId, { persistCurrent: false });
+    else setView("library");
   }
   renderShelf();
   renderCollection();
@@ -506,12 +492,12 @@ function setView(view) {
 }
 
 function currentChapters(book) {
-  return book.format === "text" ? book.chapters : [];
+  return book?.format === "text" ? book.chapters : [];
 }
 
 function saveTextProgress(immediate = false) {
   const book = activeBook();
-  if (book.format !== "text" || $(".reader-stage").hidden || restoringTextPosition) return;
+  if (!book || book.format !== "text" || $(".reader-stage").hidden || restoringTextPosition) return;
   const scroller = $("#reader-scroll");
   const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
   const progress = activeChapter;
@@ -858,7 +844,9 @@ async function importBackup(file) {
 }
 
 function moveChapter(offset) {
-  if (activeBook().format === "epub") {
+  const book = activeBook();
+  if (!book) return;
+  if (book.format === "epub") {
     const index = activeEpubChapter + offset;
     if (epubChapters[index]) {
       activeEpubChapter = index;
@@ -1076,15 +1064,16 @@ async function syncReader(readerId, branch, remote, revision, removedIds) {
   }
   if (revision !== libraryRevision) { syncPending = true; return; }
   saveTextProgress(true);
-  const before = JSON.stringify(readingState(activeBook()));
+  const book = activeBook();
+  const before = JSON.stringify(readingState(book));
   readers[readerId] = mergeReader(readers[readerId], snapshot);
   for (const bookId of removedIds) delete readers[readerId].books[bookId];
   saveReaders();
-  if (before !== JSON.stringify(readingState(activeBook())) && !$(".reader-stage").hidden && !removedIds.has(activeBookId)) {
+  if (book && before !== JSON.stringify(readingState(book)) && !$(".reader-stage").hidden && !removedIds.has(book.id)) {
     readingSession += 1;
     restoringTextPosition = false;
-    if (activeBook().format === "epub") await showEpub(activeBook());
-    else renderTextChapter(Number(readingState(activeBook()).progress) || 0, false);
+    if (book.format === "epub") await showEpub(book);
+    else renderTextChapter(Number(readingState(book).progress) || 0, false);
   }
 }
 
@@ -1250,7 +1239,10 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (revision !== libraryRevision) { syncPending = true; return; }
     books = syncedLocalBooks;
     const currentBook = activeBook();
-    if (!$(".reader-stage").hidden && (previousBook.id !== currentBook.id || previousBook.contentUpdatedAt !== currentBook.contentUpdatedAt)) {
+    if (!currentBook && !$(".reader-stage").hidden) {
+      activeBookId = "";
+      setView("library");
+    } else if (currentBook && !$(".reader-stage").hidden && (!previousBook || previousBook.id !== currentBook.id || previousBook.contentUpdatedAt !== currentBook.contentUpdatedAt)) {
       readingSession += 1;
       restoringTextPosition = false;
       activeBookId = currentBook.id;
@@ -1341,7 +1333,12 @@ function bindEvents() {
   $("#font-down").addEventListener("click", () => setFontSize(fontSize - 1));
   $("#font-up").addEventListener("click", () => setFontSize(fontSize + 1));
   document.querySelectorAll(".theme-swatch").forEach((button) => button.addEventListener("click", () => setTheme(button.dataset.theme)));
-  $("#chapter-select").addEventListener("change", (event) => activeBook().format === "epub" ? epubRendition?.display(event.target.value) : renderTextChapter(Number(event.target.value)));
+  $("#chapter-select").addEventListener("change", (event) => {
+    const book = activeBook();
+    if (!book) return;
+    if (book.format === "epub") epubRendition?.display(event.target.value);
+    else renderTextChapter(Number(event.target.value));
+  });
   $("#prev-chapter").addEventListener("click", () => moveChapter(-1));
   $("#next-chapter").addEventListener("click", () => moveChapter(1));
   $("#mobile-menu").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
@@ -1362,9 +1359,9 @@ function bindEvents() {
     epubRendition?.destroy();
     epubRendition = epubBook = null;
     epubBookId = epubBookContentVersion = null;
-    await replaceBooks([sampleBook]);
-    books = [sampleBook];
-    activeBookId = sampleBook.id;
+    await replaceBooks([]);
+    books = [];
+    activeBookId = "";
     renderShelf();
     setView("library");
     $("#settings-dialog").close();
@@ -1387,16 +1384,20 @@ async function init() {
     navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service Worker 注册失败：", error));
   }
   books = await allBooks();
+  const hadDemoBook = books.some((book) => book.id === DEMO_BOOK_ID);
+  books = books.filter((book) => book.id !== DEMO_BOOK_ID);
   const savedReaders = localStorage.getItem(READERS_KEY);
   const stored = savedReaders ? JSON.parse(savedReaders) : {};
   loadCloudCatalog();
   for (const defaults of READER_DEFAULTS) readers[defaults.id] = stored[defaults.id] || emptyReader(defaults);
+  const hadDemoReaderData = Object.values(readers).some((reader) => Object.hasOwn(reader.books, DEMO_BOOK_ID) || reader.activeBookId === DEMO_BOOK_ID);
+  for (const reader of Object.values(readers)) {
+    delete reader.books[DEMO_BOOK_ID];
+    if (reader.activeBookId === DEMO_BOOK_ID) reader.activeBookId = "";
+  }
+  if (hadDemoBook || hadDemoReaderData) saveReaders();
   books = migrateLegacyData(books, savedReaders ? null : { fontSize: localStorage.getItem("yejian-font-size"), theme: localStorage.getItem("yejian-theme") }, localStorage.getItem(SETTINGS_UPDATED_KEY), localStorage.getItem(ACTIVE_BOOK_KEY) || "");
   await replaceBooks(books);
-  if (!books.length) {
-    await saveBook(sampleBook);
-    books = [sampleBook];
-  }
   applyReader();
   renderShelf();
   setTheme(activeTheme, false);
