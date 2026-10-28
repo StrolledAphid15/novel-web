@@ -38,6 +38,7 @@ let epubBookContentVersion = null;
 let epubRendition = null;
 let epubChapters = [];
 let activeEpubChapter = 0;
+const chapterGestureState = { wheelAt: -Infinity, wheelChapter: "", wheelAtBottom: false, wheelUsed: false, changing: false };
 let githubToken = null;
 let toastTimer;
 let syncInProgress = false;
@@ -211,7 +212,7 @@ async function allBooks() {
   const db = await dbPromise;
   return new Promise((resolve, reject) => {
     const request = db.transaction("books").objectStore("books").getAll();
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => resolve(request.result.map((book) => book?.format === "text" ? { ...book, chapters: normalizeTextChapters(book.chapters) } : book));
     request.onerror = () => reject(request.error);
   });
 }
@@ -492,7 +493,73 @@ function setView(view) {
 }
 
 function currentChapters(book) {
-  return book?.format === "text" ? book.chapters : [];
+  return book?.format === "text" ? normalizeTextChapters(book.chapters) : [];
+}
+
+function bindChapterGestures(target) {
+  let touch = null;
+  const chapterKey = () => {
+    const book = activeBook();
+    if (!book || $(".reader-stage").hidden || $("#next-chapter").disabled || restoringTextPosition || chapterGestureState.changing || document.querySelector("dialog[open]")) return "";
+    const index = book.format === "epub" ? activeEpubChapter : activeChapter;
+    return `${readingSession}:${book.id}:${index}`;
+  };
+  const atBottom = () => {
+    // EPUB iframes expand to content height; their outer containers do the scrolling.
+    const scrollers = [$("#reader-scroll")];
+    if (activeBook()?.format === "epub") scrollers.push(epubRendition?.manager?.container, $("#epub-host"));
+    return scrollers.filter(Boolean).every((scroller) => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 3);
+  };
+  const advance = async () => {
+    chapterGestureState.changing = true;
+    try {
+      await moveChapter(1);
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      chapterGestureState.changing = false;
+    }
+  };
+  target.addEventListener("wheel", (event) => {
+    if (event.ctrlKey || event.metaKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    const now = performance.now();
+    const key = chapterKey();
+    if (now - chapterGestureState.wheelAt > 200) {
+      chapterGestureState.wheelChapter = key;
+      chapterGestureState.wheelAtBottom = atBottom();
+      chapterGestureState.wheelUsed = false;
+    }
+    chapterGestureState.wheelAt = now;
+    if (event.deltaY < 0) chapterGestureState.wheelAtBottom = false;
+    if (!key || key !== chapterGestureState.wheelChapter || !chapterGestureState.wheelAtBottom || chapterGestureState.wheelUsed || event.deltaY <= 0 || !atBottom()) return;
+    event.preventDefault();
+    chapterGestureState.wheelUsed = true;
+    advance();
+  }, { passive: false, capture: true });
+  target.addEventListener("touchstart", (event) => {
+    touch = null;
+    const key = chapterKey();
+    if (event.touches.length !== 1 || !key || !atBottom()) return;
+    const point = event.touches[0];
+    touch = { id: point.identifier, x: point.clientX, y: point.clientY, chapter: key };
+  }, { passive: true, capture: true });
+  target.addEventListener("touchmove", (event) => {
+    if (event.touches.length !== 1) { touch = null; return; }
+    if (!touch || touch.chapter !== chapterKey()) return;
+    const point = event.touches[0];
+    const distance = touch.y - point.clientY;
+    if (distance > 0 && distance > Math.abs(point.clientX - touch.x) && atBottom() && event.cancelable) event.preventDefault();
+  }, { passive: false, capture: true });
+  target.addEventListener("touchend", (event) => {
+    const gesture = touch;
+    touch = null;
+    if (!gesture || gesture.chapter !== chapterKey() || !atBottom()) return;
+    const point = Array.from(event.changedTouches).find((item) => item.identifier === gesture.id);
+    if (!point) return;
+    const distance = gesture.y - point.clientY;
+    if (distance >= 48 && distance > Math.abs(point.clientX - gesture.x)) advance();
+  }, { passive: true, capture: true });
+  target.addEventListener("touchcancel", () => { touch = null; }, { passive: true, capture: true });
 }
 
 function saveTextProgress(immediate = false) {
@@ -668,6 +735,7 @@ async function showEpub(book) {
       const style = contents.document.createElement("style");
       style.textContent = `@font-face { font-family: "YeJianReading"; src: url("${readingFontUrl}") format("truetype"); font-style: normal; font-weight: 400; } body, body * { font-family: "YeJianReading", serif !important; }`;
       (contents.document.head || contents.document.documentElement).append(style);
+      bindChapterGestures(contents.document);
     });
     epubRendition.themes.fontSize(`${fontSize}px`);
     setTheme(activeTheme, false);
@@ -738,6 +806,15 @@ function decodeTextFile(buffer) {
   }
 }
 
+function normalizeTextChapters(chapters) {
+  if (!Array.isArray(chapters)) return [];
+  return chapters.map((chapter) => {
+    const item = chapter && typeof chapter === "object" ? chapter : {};
+    const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs.map((line) => String(line).trim()).filter(Boolean) : [];
+    return { ...item, title: String(item.title || "正文").trim() || "正文", subtitle: String(item.subtitle || "").trim(), paragraphs };
+  }).filter((chapter) => chapter.paragraphs.length);
+}
+
 async function splitIntoChapters(text) {
   const lines = text.replace(/\r/g, "").split("\n");
   const headings = /^(?:第[零〇一二三四五六七八九十百千万\d]+[章节回卷部篇].*|序章.*|楔子.*|序言.*|Chapter\s+\d+.*)$/i;
@@ -759,7 +836,7 @@ async function splitIntoChapters(text) {
     if (start + 2000 < lines.length) await new Promise(requestAnimationFrame);
   }
   if (current.paragraphs.length || !chapters.length) chapters.push(current);
-  return chapters.filter((chapter) => chapter.paragraphs.length);
+  return normalizeTextChapters(chapters);
 }
 
 async function importFiles(fileList) {
@@ -850,7 +927,7 @@ function moveChapter(offset) {
     const index = activeEpubChapter + offset;
     if (epubChapters[index]) {
       activeEpubChapter = index;
-      epubRendition?.display(epubChapters[index].href);
+      return epubRendition?.display(epubChapters[index].href);
     }
     return;
   }
@@ -1283,7 +1360,6 @@ async function syncToGitHub({ automatic = false } = {}) {
       $("#local-status").textContent = "正在重新同步到 GitHub";
     } else if (automatic) {
       $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
-      notify(`同步失败：${error.message}`);
     } else {
       notify(error.message);
     }
@@ -1343,6 +1419,7 @@ function bindEvents() {
   $("#next-chapter").addEventListener("click", () => moveChapter(1));
   $("#mobile-menu").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
   $("#reader-scroll").addEventListener("scroll", () => saveTextProgress(), { passive: true });
+  bindChapterGestures($("#reader-scroll"));
   $("#collection-search").addEventListener("input", renderCollection);
   $("#cloud-search").addEventListener("input", renderCloudCollection);
   $("#collection-import").addEventListener("click", () => $("#file-input").click());
@@ -1406,6 +1483,7 @@ async function init() {
   setView("library");
   $("#crumb-title").textContent = "共用书库";
   githubToken = localStorage.getItem(GITHUB_TOKEN_KEY);
+  syncToGitHub({ automatic: true }).catch((error) => { $("#sync-feedback").textContent = error.message; });
 }
 
 init().catch((error) => notify(`阅读器启动失败：${error.message}`));
