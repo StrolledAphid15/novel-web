@@ -38,7 +38,7 @@ let epubBookContentVersion = null;
 let epubRendition = null;
 let epubChapters = [];
 let activeEpubChapter = 0;
-const chapterGestureState = { wheelAt: -Infinity, wheelChapter: "", wheelAtBottom: false, wheelUsed: false, changing: false };
+const chapterGestureState = { wheelAt: -Infinity, wheelChapter: "", wheelAtBottom: false, wheelUsed: false, touchReadyChapter: "", touchScrollChapter: "", changing: false };
 let githubToken = null;
 let toastTimer;
 let syncInProgress = false;
@@ -511,6 +511,7 @@ function bindChapterGestures(target) {
     return scrollers.filter(Boolean).every((scroller) => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 3);
   };
   const advance = async () => {
+    chapterGestureState.touchReadyChapter = chapterGestureState.touchScrollChapter = "";
     chapterGestureState.changing = true;
     try {
       await moveChapter(1);
@@ -536,28 +537,44 @@ function bindChapterGestures(target) {
     chapterGestureState.wheelUsed = true;
     advance();
   }, { passive: false, capture: true });
+  target.addEventListener("scroll", () => {
+    const key = chapterKey();
+    if (!key) return;
+    if (!atBottom()) chapterGestureState.touchReadyChapter = "";
+    else if (chapterGestureState.touchScrollChapter === key) chapterGestureState.touchReadyChapter = key;
+  }, { passive: true, capture: true });
   target.addEventListener("touchstart", (event) => {
     touch = null;
+    chapterGestureState.touchScrollChapter = "";
     const key = chapterKey();
-    if (event.touches.length !== 1 || !key || !atBottom()) return;
+    if (event.touches.length !== 1 || !key) return;
+    const startedAtBottom = atBottom();
+    if (!startedAtBottom) chapterGestureState.touchReadyChapter = "";
     const point = event.touches[0];
-    touch = { id: point.identifier, x: point.clientX, y: point.clientY, chapter: key };
+    touch = { id: point.identifier, x: point.screenX, y: point.screenY, chapter: key, startedAtBottom, ready: chapterGestureState.touchReadyChapter === key };
   }, { passive: true, capture: true });
   target.addEventListener("touchmove", (event) => {
-    if (event.touches.length !== 1) { touch = null; return; }
+    if (event.touches.length !== 1) { touch = null; chapterGestureState.touchScrollChapter = ""; return; }
     if (!touch || touch.chapter !== chapterKey()) return;
     const point = event.touches[0];
-    const distance = touch.y - point.clientY;
-    if (distance > 0 && distance > Math.abs(point.clientX - touch.x) && atBottom() && event.cancelable) event.preventDefault();
+    const distance = touch.y - point.screenY;
+    if (distance > 0 && distance > Math.abs(point.screenX - touch.x)) {
+      chapterGestureState.touchScrollChapter = touch.chapter;
+      if (touch.startedAtBottom && atBottom() && event.cancelable) event.preventDefault();
+    }
   }, { passive: false, capture: true });
   target.addEventListener("touchend", (event) => {
     const gesture = touch;
     touch = null;
-    if (!gesture || gesture.chapter !== chapterKey() || !atBottom()) return;
+    if (!gesture || gesture.chapter !== chapterKey()) return;
     const point = Array.from(event.changedTouches).find((item) => item.identifier === gesture.id);
     if (!point) return;
-    const distance = gesture.y - point.clientY;
-    if (distance >= 48 && distance > Math.abs(point.clientX - gesture.x)) advance();
+    const distance = gesture.y - point.screenY;
+    if (distance < 48 || distance <= Math.abs(point.screenX - gesture.x)) return;
+    chapterGestureState.touchScrollChapter = gesture.chapter;
+    if (!atBottom()) return;
+    if (gesture.startedAtBottom && gesture.ready) advance();
+    else chapterGestureState.touchReadyChapter = gesture.chapter;
   }, { passive: true, capture: true });
   target.addEventListener("touchcancel", () => { touch = null; }, { passive: true, capture: true });
 }
@@ -578,6 +595,7 @@ function saveTextProgress(immediate = false) {
 
 function renderTextChapter(index, save = true) {
   if (save) saveTextProgress(true);
+  chapterGestureState.touchReadyChapter = chapterGestureState.touchScrollChapter = "";
   const book = activeBook();
   const chapters = currentChapters(book);
   if (!chapters.length) return;
@@ -924,6 +942,7 @@ function moveChapter(offset) {
   const book = activeBook();
   if (!book) return;
   if (book.format === "epub") {
+    chapterGestureState.touchReadyChapter = chapterGestureState.touchScrollChapter = "";
     const index = activeEpubChapter + offset;
     if (epubChapters[index]) {
       activeEpubChapter = index;
@@ -1412,8 +1431,10 @@ function bindEvents() {
   $("#chapter-select").addEventListener("change", (event) => {
     const book = activeBook();
     if (!book) return;
-    if (book.format === "epub") epubRendition?.display(event.target.value);
-    else renderTextChapter(Number(event.target.value));
+    if (book.format === "epub") {
+      chapterGestureState.touchReadyChapter = chapterGestureState.touchScrollChapter = "";
+      epubRendition?.display(event.target.value);
+    } else renderTextChapter(Number(event.target.value));
   });
   $("#prev-chapter").addEventListener("click", () => moveChapter(-1));
   $("#next-chapter").addEventListener("click", () => moveChapter(1));
