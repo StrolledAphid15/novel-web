@@ -640,6 +640,10 @@ function setTheme(theme, sync = true) {
   const stage = document.querySelector(".reader-stage");
   stage.classList.remove("theme-paper", "theme-warm", "theme-night");
   stage.classList.add(`theme-${theme}`);
+  document.querySelectorAll(".settings-dialog").forEach((dialog) => {
+    dialog.classList.remove("theme-paper", "theme-warm", "theme-night");
+    dialog.classList.add(`theme-${theme}`);
+  });
   if (!$(".reader-stage").hidden) {
     const mainArea = document.querySelector(".main-area");
     mainArea.classList.remove("theme-paper", "theme-warm", "theme-night");
@@ -653,7 +657,16 @@ function setTheme(theme, sync = true) {
     saveReaders();
   }
   const rendition = epubRendition;
-  if (rendition) rendition.themes.default({ body: { color: theme === "night" ? "#dddcd2 !important" : theme === "warm" ? "#453d34 !important" : "#373833 !important", background: theme === "night" ? "#222623 !important" : theme === "warm" ? "#f4f0e7 !important" : "#fbfbf9 !important" } });
+  if (rendition) {
+    const ink = theme === "night" ? "#dddcd2" : theme === "warm" ? "#453d34" : "#373833";
+    const background = theme === "night" ? "#222623" : theme === "warm" ? "#f4f0e7" : "#fbfbf9";
+    const link = theme === "night" ? "#a8c7b3" : "#476b5c";
+    rendition.themes.default({
+      body: { color: `${ink} !important`, background: `${background} !important` },
+      "body *": { color: `${ink} !important`, "-webkit-text-fill-color": `${ink} !important` },
+      "a, a *": { color: `${link} !important`, "-webkit-text-fill-color": `${link} !important` }
+    });
+  }
 }
 
 function setFontSize(size, sync = true) {
