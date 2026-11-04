@@ -1324,36 +1324,33 @@ async function readGitHubFileSha(path, branch) {
   }
 }
 
-// 写入云端书籍正文：传给 GitHub 的 sha 取自清单，可能已经过期，
-// 这时会一直 422 冲突并把整个同步卡在无限重试里；冲突时先取当前 sha 再写一次。
-async function writeCloudBookFile(path, content, branch, fileSha) {
+// 云端写入/删除一律以“目标文件当前 sha”为准，绝不使用清单里记的 fileSha：
+// 那是另一份文件的记账值，过期后会让 GitHub 连续返回 422，把同步卡在无限重试里。
+// knownSha 只在调用方刚刚读过同一个文件时才传入，可以省掉一次请求。
+async function putCloudFile(path, value, branch, knownSha) {
+  const sha = knownSha === undefined ? await readGitHubFileSha(path, branch).catch(() => null) : knownSha;
   try {
-    return await writeGitHubJson(path, content, branch, fileSha || null);
+    return await writeGitHubJson(path, value, branch, sha);
   } catch (error) {
     if (!error.isConflict) throw error;
     const freshSha = await readGitHubFileSha(path, branch).catch(() => null);
-    if (!freshSha || freshSha === fileSha) throw error;
-    return writeGitHubJson(path, content, branch, freshSha);
+    if (freshSha === sha) throw error;
+    return writeGitHubJson(path, value, branch, freshSha);
   }
 }
 
-// 删除云端书籍正文：清单里记录的 sha 可能已过期（文件被重新上传过），
-// 这时先取一次当前 sha 再删；确实删不掉就当成孤儿文件，绝不让整个同步卡死。
-async function deleteCloudBookFile(id, branch, fileSha) {
-  const path = `sync/books/${id}.json`;
-  const sha = fileSha || await readGitHubFileSha(path, branch).catch(() => null);
-  if (!sha) return;
+async function deleteCloudFile(path, branch) {
+  const sha = await readGitHubFileSha(path, branch).catch(() => null);
+  if (!sha) return false;
   try {
     await deleteGitHubFile(path, branch, sha);
+    return true;
   } catch (error) {
     if (!error.isConflict) throw error;
     const freshSha = await readGitHubFileSha(path, branch).catch(() => null);
-    if (!freshSha || freshSha === sha) return;
-    try {
-      await deleteGitHubFile(path, branch, freshSha);
-    } catch (retryError) {
-      if (!retryError.isConflict) throw retryError;
-    }
+    if (!freshSha || freshSha === sha) return false;
+    await deleteGitHubFile(path, branch, freshSha);
+    return true;
   }
 }
 
@@ -1372,7 +1369,9 @@ function bookDescriptor(book, contentHash, fileSha) {
 
 function mergeDescriptor(local, remote) {
   const metadata = (remote.metadataUpdatedAt || 0) > (local.metadataUpdatedAt || 0) ? remote : local;
-  return { ...local, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || local.updatedAt || 0, remote.addedAt || remote.updatedAt || 0), metadataUpdatedAt: metadata.metadataUpdatedAt };
+  // fileSha 只存在于云端清单里（本机书库里没有），内容没变时必须保留云端那份，
+  // 否则每次同步写回的清单都会丢掉 fileSha，造成无意义的清单变更。
+  return { ...local, fileSha: local.fileSha || remote.fileSha || null, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || local.updatedAt || 0, remote.addedAt || remote.updatedAt || 0), metadataUpdatedAt: metadata.metadataUpdatedAt };
 }
 
 async function syncReader(readerId, branch, remote, revision, removedIds) {
@@ -1457,7 +1456,6 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (cloudManifest && (cloudManifest.version || 1) < 3) {
       cloudManifest = { ...cloudManifest, books: migrateLegacyData(cloudManifest.books || [], cloudManifest.settings, cloudManifest.settingsUpdatedAt) };
     }
-    const remoteReader = await readGitHubJson(`sync/readers/${readerId}.json`, readerBranch);
     const revision = libraryRevision;
     const localBooks = new Map(books.map((book) => [book.id, { ...book }]));
     const remoteBooks = new Map((cloudManifest?.books || []).map((book) => [book.id, book]));
@@ -1492,7 +1490,8 @@ async function syncToGitHub({ automatic = false } = {}) {
         if (existing && await contentHash(existing.value) === localHash) {
           fileSha = existing.sha;
         } else {
-          const saved = await writeCloudBookFile(path, cloudContent(local), branch, existing?.sha || null);
+          // 刚刚读过这个文件，直接用它当前 sha，不再依赖清单记录。
+          const saved = await putCloudFile(path, cloudContent(local), branch, existing?.sha || null);
           fileSha = saved.content.sha;
         }
         const descriptor = bookDescriptor(local, localHash, fileSha);
@@ -1500,7 +1499,7 @@ async function syncToGitHub({ automatic = false } = {}) {
       } else if (remote.contentHash !== localHash) {
         const localContentAt = local.contentUpdatedAt || local.addedAt || local.updatedAt || 0;
         if (localContentAt >= (remote.contentUpdatedAt || 0)) {
-          const saved = await writeCloudBookFile(path, cloudContent(local), branch, remote.fileSha);
+          const saved = await putCloudFile(path, cloudContent(local), branch);
           fileSha = saved.content.sha;
           mergedBooks.set(id, bookDescriptor(local, localHash, fileSha));
         } else {
@@ -1531,9 +1530,11 @@ async function syncToGitHub({ automatic = false } = {}) {
     if (revision !== libraryRevision) { syncPending = true; return false; }
     for (const [id] of tombstones) {
       if (!remoteBooks.has(id)) continue;
-      await deleteCloudBookFile(id, branch, remoteBooks.get(id)?.fileSha || null);
+      await deleteCloudFile(`sync/books/${id}.json`, branch);
     }
     const removedIds = new Set([...tombstones.keys()].filter((id) => !mergedBooks.has(id)));
+    // 就在合并前才读读者档案：之前的位置离写回太远（中间可能上传几十秒），容易白撞冲突。
+    const remoteReader = await readGitHubJson(`sync/readers/${readerId}.json`, readerBranch);
     await syncReader(readerId, readerBranch, remoteReader, revision, removedIds);
     for (const { id } of READER_DEFAULTS) {
       if (id !== readerId) await removeDeletedReaderStates(id, removedIds);
@@ -1553,8 +1554,13 @@ async function syncToGitHub({ automatic = false } = {}) {
     const { updatedAt: ignoredUpdatedAt, ...manifestState } = manifest;
     const { updatedAt: ignoredCloudUpdatedAt, ...cloudManifestState } = cloudManifest || {};
     if (!cloudManifest || JSON.stringify(manifestState) !== JSON.stringify(cloudManifestState)) {
+      // 上传正文可能耗时很久，写清单前再确认一次云端清单没被别的设备改过：
+      // 变了就安静地重新合并（下一轮会读到最新数据），而不是用旧信息去顶掉别人。
+      const latestManifestSha = await readGitHubFileSha(GITHUB_MANIFEST_PATH, branch).catch(() => manifestRead?.sha || null);
+      if ((latestManifestSha || null) !== (manifestRead?.sha || null)) { syncPending = true; return false; }
       manifest.updatedAt = Date.now();
-      await writeGitHubJson(GITHUB_MANIFEST_PATH, manifest, branch, manifestRead?.sha || null);
+      // 用刚刚预检得到的 sha 写入；万一这毫秒内又被改，外层会重新合并（不做盲目覆盖）。
+      await writeGitHubJson(GITHUB_MANIFEST_PATH, manifest, branch, latestManifestSha);
     }
     cloudCatalog = { ...manifest, updatedAt: manifest.updatedAt || cloudManifest?.updatedAt || Date.now() };
     saveCloudCatalog();
