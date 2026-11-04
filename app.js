@@ -61,8 +61,6 @@ let syncRunId = 0;
 let syncLockTimer = null;
 let lastSyncSucceeded = null;
 const syncOwner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-// 旧演示书（《雾港来信》/第一章“雾起时分”）的 id 集合，本地与云端都要清干净。
-const legacyDemoIds = new Set([DEMO_BOOK_ID]);
 
 function loadScript(url) {
   return new Promise((resolve, reject) => {
@@ -165,14 +163,14 @@ function cloudDescriptor(id) {
 // 旧演示书判定：id 命中，或书名与章节内容都命中（防止被重新导入成新的 id 后残留）。
 function isLegacyDemoBook(book) {
   if (!book) return false;
-  if (legacyDemoIds.has(book.id)) return true;
+  if (book.id === DEMO_BOOK_ID) return true;
   if (String(book.title || "").trim() !== DEMO_BOOK_TITLE) return false;
   return normalizeTextChapters(book.chapters).some((chapter) => chapter.title.includes(DEMO_CHAPTER_TITLE));
 }
 
 function isLegacyDemoDescriptor(descriptor) {
   if (!descriptor) return false;
-  if (legacyDemoIds.has(descriptor.id)) return true;
+  if (descriptor.id === DEMO_BOOK_ID) return true;
   return descriptor.format === "text" && String(descriptor.title || "").trim() === DEMO_BOOK_TITLE;
 }
 
@@ -1313,6 +1311,37 @@ async function deleteGitHubFile(path, branch, sha) {
   return response?.json();
 }
 
+async function readGitHubFileSha(path, branch) {
+  const response = await githubRequest(path, branch, { allowMissing: true });
+  if (!response) return null;
+  try {
+    const file = await response.json();
+    return typeof file?.sha === "string" ? file.sha : null;
+  } catch {
+    return null;
+  }
+}
+
+// 删除云端书籍正文：清单里记录的 sha 可能已过期（文件被重新上传过），
+// 这时先取一次当前 sha 再删；确实删不掉就当成孤儿文件，绝不让整个同步卡死。
+async function deleteCloudBookFile(id, branch, fileSha) {
+  const path = `sync/books/${id}.json`;
+  const sha = fileSha || await readGitHubFileSha(path, branch).catch(() => null);
+  if (!sha) return;
+  try {
+    await deleteGitHubFile(path, branch, sha);
+  } catch (error) {
+    if (!error.isConflict) throw error;
+    const freshSha = await readGitHubFileSha(path, branch).catch(() => null);
+    if (!freshSha || freshSha === sha) return;
+    try {
+      await deleteGitHubFile(path, branch, freshSha);
+    } catch (retryError) {
+      if (!retryError.isConflict) throw retryError;
+    }
+  }
+}
+
 function bookDescriptor(book, contentHash, fileSha) {
   const addedAt = Number(book.addedAt || 0);
   const updatedAt = Number(book.updatedAt || addedAt);
@@ -1424,9 +1453,9 @@ async function syncToGitHub({ automatic = false } = {}) {
       const remoteUpdatedAt = remote?.updatedAt || remote?.addedAt || 0;
       tombstones.set(id, Math.max(tombstones.get(id) || 0, Date.now(), remoteUpdatedAt + 1));
     });
-    // 旧演示书永久墓碑：删除云端正文与清单条目，也顺带清掉两位读者在云端的记录，
-    // 这样即使某台设备还留着旧数据，同步回来也会被再次删掉。
-    for (const id of legacyDemoIds) tombstones.set(id, Math.max(tombstones.get(id) || 0, DEMO_TOMBSTONE_AT));
+    // 旧演示书永久墓碑（只有固定 id 这一本，时间戳固定不变，清单不会反复产生新提交）：
+    // 删除云端正文与清单条目，也清掉两位读者在云端的记录，旧设备同步回来也会被再次删掉。
+    tombstones.set(DEMO_BOOK_ID, Math.max(tombstones.get(DEMO_BOOK_ID) || 0, DEMO_TOMBSTONE_AT));
     const mergedBooks = new Map(remoteBooks);
     const nextLocalBooks = new Map(localBooks);
 
@@ -1484,8 +1513,8 @@ async function syncToGitHub({ automatic = false } = {}) {
     const syncedLocalBooks = [...nextLocalBooks.values()];
     if (revision !== libraryRevision) { syncPending = true; return false; }
     for (const [id] of tombstones) {
-      const remote = remoteBooks.get(id);
-      if (remote?.fileSha) await deleteGitHubFile(`sync/books/${id}.json`, branch, remote.fileSha);
+      if (!remoteBooks.has(id)) continue;
+      await deleteCloudBookFile(id, branch, remoteBooks.get(id)?.fileSha || null);
     }
     const removedIds = new Set([...tombstones.keys()].filter((id) => !mergedBooks.has(id)));
     await syncReader(readerId, readerBranch, remoteReader, revision, removedIds);
@@ -1659,23 +1688,30 @@ function bindEvents() {
 async function loadLibrary() {
   books = await allBooks();
   const savedReaders = localStorage.getItem(READERS_KEY);
-  // 清掉旧演示书：本地正文、两位读者的记录、本机缓存的云端目录都要清，
+  // 清掉旧演示书：本机正文、两位读者的记录、本机缓存的云端目录都要清，
   // 否则它会一直停在“云端书库”里，点开又下载回来。
+  const cloudListedIds = new Set(cloudCatalog.books.map((book) => book.id));
   const demoBooks = books.filter(isLegacyDemoBook);
-  demoBooks.forEach((book) => legacyDemoIds.add(book.id));
+  const demoDescriptors = cloudCatalog.books.filter(isLegacyDemoDescriptor);
+  const demoIds = new Set([DEMO_BOOK_ID, ...demoBooks.map((book) => book.id), ...demoDescriptors.map((book) => book.id)]);
   const hadDemoBook = demoBooks.length > 0;
   if (hadDemoBook) books = books.filter((book) => !isLegacyDemoBook(book));
-  const hadDemoReaderData = Object.values(readers).some((reader) => [...legacyDemoIds].some((id) => Object.hasOwn(reader.books, id)) || legacyDemoIds.has(reader.activeBookId));
+  const hadDemoReaderData = Object.values(readers).some((reader) => [...demoIds].some((id) => Object.hasOwn(reader.books, id)) || demoIds.has(reader.activeBookId));
   for (const reader of Object.values(readers)) {
-    for (const id of legacyDemoIds) delete reader.books[id];
-    if (legacyDemoIds.has(reader.activeBookId)) reader.activeBookId = "";
+    for (const id of demoIds) delete reader.books[id];
+    if (demoIds.has(reader.activeBookId)) reader.activeBookId = "";
   }
   if (hadDemoReaderData) saveReaders();
-  const demoDescriptors = cloudCatalog.books.filter(isLegacyDemoDescriptor);
   if (demoDescriptors.length) {
-    demoDescriptors.forEach((book) => legacyDemoIds.add(book.id));
     cloudCatalog = { ...cloudCatalog, books: cloudCatalog.books.filter((book) => !isLegacyDemoDescriptor(book)) };
     saveCloudCatalog();
+  }
+  // 演示书本体（固定 id）在同步里用永久墓碑；按书名/章节认出的其它残留只排队“删除云端”一次，
+  // 同步成功后标记会被清掉，不会长期留在清单里，也不会误伤同名的正常书籍。
+  const extraCloudDeletes = [...demoIds].filter((id) => id !== DEMO_BOOK_ID && cloudListedIds.has(id));
+  if (extraCloudDeletes.length) {
+    const queued = JSON.parse(localStorage.getItem(DELETED_BOOKS_KEY) || "[]");
+    localStorage.setItem(DELETED_BOOKS_KEY, JSON.stringify([...new Set([...queued, ...extraCloudDeletes])]));
   }
   // 只有真的需要迁移或清理时才整体重写数据库；否则每次启动都重写会让手机端等很久。
   const needsRewrite = hadDemoBook || books.some((book) => READING_FIELDS.some((key) => Object.hasOwn(book, key)));
