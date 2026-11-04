@@ -1,5 +1,6 @@
-const CACHE_NAME = "yejian-shell-v28";
-const APP_FILES = ["./", "./index.html", "./styles.css", "./app.js?v=1.7.6", "./manifest.webmanifest", "./icon.svg", "./fonts/FZFWZHUZGDLMCJW.TTF"];
+const CACHE_NAME = "yejian-shell-v29";
+// 体积大的阅读字体不进安装预缓存，改成首次阅读时按需缓存，避免手机上装 SW 时长时间等 5MB 字体。
+const APP_FILES = ["./", "./index.html", "./styles.css?v=1.8.0", "./app.js?v=1.8.0", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_FILES)));
@@ -18,8 +19,11 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (request.method !== "GET" || url.origin !== self.location.origin) return;
 
+  // 页面导航不用浏览器 HTTP 缓存里的旧副本，否则刚发布的新版本可能要等很久才生效。
+  const init = request.mode === "navigate" ? { cache: "no-cache" } : undefined;
+
   event.respondWith(
-    fetch(request).then((response) => {
+    fetch(request, init).then((response) => {
       if (response.ok) event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone())));
       return response;
     }).catch(async () => {

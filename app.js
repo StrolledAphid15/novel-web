@@ -17,6 +17,11 @@ const SYNC_LOCK_KEY = "yejian-github-sync-lock";
 const SYNC_LOCK_TTL = 30000;
 const READER_DEFAULTS = [{ id: "reader-a", name: "纨絔" }, { id: "reader-b", name: "澪" }];
 const READING_FIELDS = ["progress", "scrollProgress", "cfi", "progressUpdatedAt", "lastOpenedAt"];
+// EPUB 依赖按需加载，避免启动时被 CDN 阻塞（手机网络下常常要等很久才能出正文）。
+const EPUB_SCRIPTS = [
+  "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js",
+  "https://unpkg.com/epubjs@0.3.93/dist/epub.min.js"
+];
 
 const $ = (selector) => document.querySelector(selector);
 const dbPromise = openDatabase();
@@ -32,6 +37,10 @@ let readingSession = 0;
 let restoringTextPosition = false;
 let switchingReader = false;
 let libraryRevision = 0;
+let libraryLoaded = false;
+let chapterSelectKey = "";
+let progressSaveTimer = null;
+let epubLibrariesPromise = null;
 let epubBook = null;
 let epubBookId = null;
 let epubBookContentVersion = null;
@@ -48,6 +57,47 @@ let syncRunId = 0;
 let syncLockTimer = null;
 let lastSyncSucceeded = null;
 const syncOwner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+function loadScript(url) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = url;
+    script.async = true;
+    script.addEventListener("load", () => resolve(), { once: true });
+    script.addEventListener("error", () => {
+      script.remove();
+      reject(new Error("EPUB 阅读组件加载失败，请检查网络后重试"));
+    }, { once: true });
+    document.head.append(script);
+  });
+}
+
+function loadEpubLibraries() {
+  if (window.JSZip && window.ePub) return Promise.resolve();
+  if (!epubLibrariesPromise) {
+    epubLibrariesPromise = EPUB_SCRIPTS.reduce((promise, url) => promise.then(() => loadScript(url)), Promise.resolve())
+      .then(() => {
+        if (!window.JSZip || !window.ePub) throw new Error("EPUB 阅读组件未加载，请检查网络后刷新页面。");
+      })
+      .catch((error) => {
+        epubLibrariesPromise = null;
+        throw error;
+      });
+  }
+  return epubLibrariesPromise;
+}
+
+function setReaderLoading(active, text = "正在打开书籍…") {
+  const loading = $("#reader-loading");
+  if (!loading) return;
+  if (active) $("#reader-loading-text").textContent = text;
+  loading.hidden = !active;
+}
+
+// 让出主线程，避免长时间同步/哈希把手机端界面卡住。
+function yieldToUi() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function acquireSyncLock() {
   const now = Date.now();
@@ -269,6 +319,13 @@ function renderShelf() {
 }
 
 function renderCollection() {
+  if (!libraryLoaded) {
+    $("#collection-count").textContent = "正在载入本地书架…";
+    $("#collection-grid").hidden = true;
+    $("#collection-grid").innerHTML = "";
+    $("#collection-empty").hidden = true;
+    return;
+  }
   const query = $("#collection-search").value.trim().toLocaleLowerCase();
   const visibleBooks = [...books]
     .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
@@ -580,6 +637,7 @@ function bindChapterGestures(target) {
 }
 
 function saveTextProgress(immediate = false) {
+  if (immediate) clearProgressSaveTimer();
   const book = activeBook();
   if (!book || book.format !== "text" || $(".reader-stage").hidden || restoringTextPosition) return;
   const scroller = $("#reader-scroll");
@@ -593,6 +651,23 @@ function saveTextProgress(immediate = false) {
   }
 }
 
+function clearProgressSaveTimer() {
+  if (progressSaveTimer !== null) {
+    clearTimeout(progressSaveTimer);
+    progressSaveTimer = null;
+  }
+}
+
+// 滚动时每一帧都写 localStorage 会让手机端明显卡顿，这里合并成低频写入；
+// 切换章节、切后台、离开页面时仍会立即保存。
+function scheduleTextProgressSave() {
+  if (progressSaveTimer !== null) return;
+  progressSaveTimer = setTimeout(() => {
+    progressSaveTimer = null;
+    saveTextProgress();
+  }, 500);
+}
+
 function renderTextChapter(index, save = true) {
   if (save) saveTextProgress(true);
   chapterGestureState.touchReadyChapter = chapterGestureState.touchScrollChapter = "";
@@ -601,6 +676,7 @@ function renderTextChapter(index, save = true) {
   if (!chapters.length) return;
   activeChapter = Math.max(0, Math.min(index, chapters.length - 1));
   const chapter = chapters[activeChapter];
+  setReaderLoading(false);
   $("#text-page").hidden = false;
   $("#epub-host").hidden = true;
   $("#chapter-title").textContent = chapter.title;
@@ -609,7 +685,13 @@ function renderTextChapter(index, save = true) {
   $("#chapter-content").innerHTML = chapter.paragraphs.map((line) => `<p>${safeText(line)}</p>`).join("");
   $("#chapter-reading-time").textContent = `约 ${Math.max(1, Math.ceil(chapter.paragraphs.join("").length / 500))} 分钟`;
   $("#chapter-counter").textContent = `${String(activeChapter + 1).padStart(2, "0")} / ${String(chapters.length).padStart(2, "0")}`;
-  $("#chapter-select").innerHTML = chapters.map((item, i) => `<option value="${i}" ${i === activeChapter ? "selected" : ""}>${safeText(item.title)}</option>`).join("");
+  // 长篇小说的章节列表可能有上千项，只在章节数量变化时重建，避免每次翻页都重排 DOM。
+  const selectKey = `${book.id}:${chapters.length}`;
+  if (chapterSelectKey !== selectKey) {
+    $("#chapter-select").innerHTML = chapters.map((item, i) => `<option value="${i}">${safeText(item.title)}</option>`).join("");
+    chapterSelectKey = selectKey;
+  }
+  $("#chapter-select").value = String(activeChapter);
   $("#prev-chapter").disabled = activeChapter === 0;
   $("#next-chapter").disabled = activeChapter === chapters.length - 1;
   $("#progress-fill").style.width = `${((activeChapter + 1) / chapters.length) * 100}%`;
@@ -692,6 +774,8 @@ async function selectBook(id, { persistCurrent = true } = {}) {
   updateReadingState(book, { lastOpenedAt: Date.now() });
   renderShelf();
   setView("reader");
+  $("#reading-state").textContent = book.format === "epub" ? "正在打开" : "正在阅读";
+  setReaderLoading(book.format === "epub");
   if (book.format === "epub") {
     await showEpub(book);
     return;
@@ -718,8 +802,22 @@ async function showEpub(book) {
   $("#epub-host").replaceChildren();
   if (epubRendition) epubRendition.destroy();
   epubRendition = null;
+  // 打开前先清掉上一本书留下的章节名与进度，避免出现“旧章节名的空白页”。
+  $("#chapter-title").textContent = book.title;
+  $("#book-author").textContent = book.author || "";
+  $("#chapter-subtitle").textContent = "";
+  $("#chapter-reading-time").textContent = "";
+  $("#chapter-counter").textContent = "";
+  $("#chapter-select").replaceChildren();
+  chapterSelectKey = "";
+  $("#progress-chapter").textContent = book.title;
+  $("#progress-percent").textContent = "";
+  $("#progress-fill").style.width = "0%";
+  $("#prev-chapter").disabled = true;
+  $("#next-chapter").disabled = true;
+  setReaderLoading(true, "正在打开 EPUB…");
   try {
-    if (!window.JSZip || !window.ePub) throw new Error("EPUB 阅读组件未加载，请检查网络后刷新页面。");
+    await loadEpubLibraries();
     await new Promise(requestAnimationFrame);
     if (session !== readingSession) return;
     const contentVersion = book.contentUpdatedAt || book.updatedAt || book.addedAt || 0;
@@ -730,12 +828,6 @@ async function showEpub(book) {
       await epubBook.ready;
       if (session !== readingSession) return;
       if (book.locations) epubBook.locations.load(book.locations);
-      else {
-        await epubBook.locations.generate(1000);
-        if (session !== readingSession) return;
-        book.locations = epubBook.locations.save();
-        await saveBook(book);
-      }
     }
     const [navigation, metadata] = await Promise.all([
       epubBook.loaded.navigation.catch(() => ({ toc: [] })),
@@ -754,6 +846,7 @@ async function showEpub(book) {
     if (!epubChapters.length) throw new Error("这本 EPUB 没有可读取的章节。");
 
     $("#chapter-select").innerHTML = epubChapters.map((item) => `<option value="${safeText(item.href)}">${safeText(item.label)}</option>`).join("");
+    chapterSelectKey = `${book.id}:epub:${epubChapters.length}`;
     $("#prev-chapter").disabled = true;
     $("#next-chapter").disabled = epubChapters.length < 2;
     epubRendition = epubBook.renderTo("epub-host", { manager: "default", width: "100%", height: "100%", flow: "scrolled-doc" });
@@ -770,17 +863,33 @@ async function showEpub(book) {
     });
     epubRendition.themes.fontSize(`${fontSize}px`);
     setTheme(activeTheme, false);
+    // 位置索引没生成好时，用「第几节 / 总节数」粗略估算进度；生成完成后会自动校正。
+    const locationPercent = (cfi) => {
+      try {
+        const locations = epubBook?.locations;
+        if (!locations) return null;
+        const total = typeof locations.length === "function" ? locations.length() : 0;
+        if (!total) return null;
+        const value = locations.percentageFromCfi(cfi);
+        return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+      } catch {
+        return null;
+      }
+    };
     const updateLocation = (location) => {
       if (session !== readingSession || $(".reader-stage").hidden) return;
       const href = (location.start.href || "").split("#")[0];
       const spineHref = spineItems[location.start.index]?.href;
       const chapter = epubChapters.find((item) => item.href.split("#")[0] === href) || epubChapters.find((item) => item.href.split("#")[0] === spineHref) || epubChapters[0];
-      activeEpubChapter = epubChapters.indexOf(chapter);
-      const percent = epubBook.locations.percentageFromCfi(location.start.cfi) || 0;
+      activeEpubChapter = Math.max(0, epubChapters.indexOf(chapter));
+      const exactPercent = locationPercent(location.start.cfi);
+      const roughPercent = spineItems.length ? Math.min(1, (Number(location.start.index) + 1) / spineItems.length) : 0;
+      const percent = exactPercent == null ? roughPercent : exactPercent;
       const state = readingState(book);
-      const progressChanged = state.cfi !== location.start.cfi || state.progress !== percent;
+      // 索引未就绪时不写入粗略进度，只记录阅读位置，避免把百分比存歪。
+      const progressChanged = state.cfi !== location.start.cfi || (exactPercent != null && state.progress !== exactPercent);
       if (progressChanged) {
-        updateReadingState(book, { cfi: location.start.cfi, progress: percent, progressUpdatedAt: Date.now() });
+        updateReadingState(book, { cfi: location.start.cfi, progress: exactPercent == null ? state.progress || 0 : exactPercent, progressUpdatedAt: Date.now() });
       }
       $("#chapter-title").textContent = chapter.label;
       $("#chapter-select").value = chapter.href;
@@ -800,24 +909,60 @@ async function showEpub(book) {
       }
     };
     epubRendition.on("relocated", updateLocation);
-    await epubRendition.display(readingState(book).cfi || epubChapters[0].href);
+    const savedState = readingState(book);
+    // 首次打开（还没有上次位置）直接显示正文，索引放到后台建；只有要恢复位置时才先等索引。
+    if (savedState.cfi && !book.locations) {
+      setReaderLoading(true, "正在恢复阅读位置…");
+      try {
+        await epubBook.locations.generate(1000);
+        if (session !== readingSession) return;
+        book.locations = epubBook.locations.save();
+        await saveBook(book);
+      } catch (error) {
+        console.warn("生成 EPUB 位置索引失败：", error);
+      }
+    }
+    const restoreTarget = savedState.cfi || epubChapters[0].href;
+    try {
+      await epubRendition.display(restoreTarget);
+    } catch (error) {
+      console.warn("无法恢复到上次的阅读位置，改为本章开头：", error);
+      await epubRendition.display(epubChapters[0].href);
+    }
     if (session !== readingSession) return;
+    setReaderLoading(false);
+    $("#reading-state").textContent = "正在阅读";
     const current = epubRendition.currentLocation();
     if (current?.start) updateLocation(current);
     $("#crumb-title").textContent = book.title;
     $("#reader-scroll").scrollTop = 0;
     if (window.innerWidth <= 760) $("#sidebar").classList.remove("open");
+    if (!book.locations) {
+      epubBook.locations.generate(1000).then(async () => {
+        if (session !== readingSession || epubBookId !== book.id || !epubBook) return;
+        book.locations = epubBook.locations.save();
+        await saveBook(book);
+        const location = epubRendition?.currentLocation?.();
+        if (location?.start) updateLocation(location);
+      }).catch((error) => console.warn("生成 EPUB 位置索引失败：", error));
+    }
   } catch (error) {
     if (session !== readingSession) return;
     epubRendition?.destroy();
     epubRendition = epubBook = null;
     epubBookId = epubBookContentVersion = null;
     epubChapters = [];
+    setReaderLoading(false);
     $("#epub-host").hidden = true;
     $("#text-page").hidden = false;
     $("#chapter-title").textContent = "无法打开这本 EPUB";
+    $("#chapter-subtitle").textContent = "";
+    $("#chapter-reading-time").textContent = "";
     $("#chapter-content").textContent = error.message;
+    $("#chapter-counter").textContent = "";
     $("#chapter-select").replaceChildren();
+    chapterSelectKey = "";
+    $("#reading-state").textContent = "打开失败";
     notify(error.message);
   }
 }
@@ -1304,6 +1449,7 @@ async function syncToGitHub({ automatic = false } = {}) {
         mergedBooks.set(id, merged);
         nextLocalBooks.set(id, { ...local, title: merged.title, author: merged.author, metadataUpdatedAt: merged.metadataUpdatedAt });
       }
+      await yieldToUi();
     }
 
     for (const [id, remote] of remoteBooks) {
@@ -1452,7 +1598,7 @@ function bindEvents() {
   $("#prev-chapter").addEventListener("click", () => moveChapter(-1));
   $("#next-chapter").addEventListener("click", () => moveChapter(1));
   $("#mobile-menu").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
-  $("#reader-scroll").addEventListener("scroll", () => saveTextProgress(), { passive: true });
+  $("#reader-scroll").addEventListener("scroll", () => scheduleTextProgressSave(), { passive: true });
   bindChapterGestures($("#reader-scroll"));
   $("#collection-search").addEventListener("input", renderCollection);
   $("#cloud-search").addEventListener("input", renderCloudCollection);
@@ -1486,6 +1632,35 @@ function bindEvents() {
   }));
 }
 
+async function loadLibrary() {
+  books = await allBooks();
+  const hadDemoBook = books.some((book) => book.id === DEMO_BOOK_ID);
+  if (hadDemoBook) books = books.filter((book) => book.id !== DEMO_BOOK_ID);
+  const savedReaders = localStorage.getItem(READERS_KEY);
+  const hadDemoReaderData = Object.values(readers).some((reader) => Object.hasOwn(reader.books, DEMO_BOOK_ID) || reader.activeBookId === DEMO_BOOK_ID);
+  for (const reader of Object.values(readers)) {
+    delete reader.books[DEMO_BOOK_ID];
+    if (reader.activeBookId === DEMO_BOOK_ID) reader.activeBookId = "";
+  }
+  if (hadDemoReaderData) saveReaders();
+  // 只有真的需要迁移或清理时才整体重写数据库；否则每次启动都重写会让手机端等很久。
+  const needsRewrite = hadDemoBook || books.some((book) => READING_FIELDS.some((key) => Object.hasOwn(book, key)));
+  books = migrateLegacyData(books, savedReaders ? null : { fontSize: localStorage.getItem("yejian-font-size"), theme: localStorage.getItem("yejian-theme") }, localStorage.getItem(SETTINGS_UPDATED_KEY), localStorage.getItem(ACTIVE_BOOK_KEY) || "");
+  if (needsRewrite) await replaceBooks(books);
+  libraryLoaded = true;
+  applyReader();
+  renderShelf();
+  renderCollection();
+}
+
+// 启动时的自动同步会读取/哈希全部书籍，很占手机端主线程，放到首屏之后空闲时再做。
+function scheduleStartupSync() {
+  if (!localStorage.getItem(GITHUB_TOKEN_KEY) || !githubRepository()) return;
+  const start = () => syncToGitHub({ automatic: true }).catch((error) => { $("#sync-feedback").textContent = error.message; });
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(start, { timeout: 3000 });
+  else setTimeout(start, 1500);
+}
+
 async function init() {
   localStorage.removeItem("yejian-onedrive-client-id");
   localStorage.removeItem("yejian-google-client-id");
@@ -1494,21 +1669,12 @@ async function init() {
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
     navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service Worker 注册失败：", error));
   }
-  books = await allBooks();
-  const hadDemoBook = books.some((book) => book.id === DEMO_BOOK_ID);
-  books = books.filter((book) => book.id !== DEMO_BOOK_ID);
+  githubToken = localStorage.getItem(GITHUB_TOKEN_KEY);
   const savedReaders = localStorage.getItem(READERS_KEY);
   const stored = savedReaders ? JSON.parse(savedReaders) : {};
   loadCloudCatalog();
   for (const defaults of READER_DEFAULTS) readers[defaults.id] = stored[defaults.id] || emptyReader(defaults);
-  const hadDemoReaderData = Object.values(readers).some((reader) => Object.hasOwn(reader.books, DEMO_BOOK_ID) || reader.activeBookId === DEMO_BOOK_ID);
-  for (const reader of Object.values(readers)) {
-    delete reader.books[DEMO_BOOK_ID];
-    if (reader.activeBookId === DEMO_BOOK_ID) reader.activeBookId = "";
-  }
-  if (hadDemoBook || hadDemoReaderData) saveReaders();
-  books = migrateLegacyData(books, savedReaders ? null : { fontSize: localStorage.getItem("yejian-font-size"), theme: localStorage.getItem("yejian-theme") }, localStorage.getItem(SETTINGS_UPDATED_KEY), localStorage.getItem(ACTIVE_BOOK_KEY) || "");
-  await replaceBooks(books);
+  // 先用本地的读者偏好把界面画出来，不等 IndexedDB 读完全部书籍（含 EPUB 正文）。
   applyReader();
   renderShelf();
   setTheme(activeTheme, false);
@@ -1516,8 +1682,15 @@ async function init() {
   bindEvents();
   setView("library");
   $("#crumb-title").textContent = "共用书库";
-  githubToken = localStorage.getItem(GITHUB_TOKEN_KEY);
-  syncToGitHub({ automatic: true }).catch((error) => { $("#sync-feedback").textContent = error.message; });
+  try {
+    await loadLibrary();
+  } catch (error) {
+    // 读不出本地书架时也要让界面可用（可重新导入或同步），不要停在加载提示上。
+    libraryLoaded = true;
+    renderCollection();
+    notify(`书架读取失败：${error.message}`);
+  }
+  scheduleStartupSync();
 }
 
 init().catch((error) => notify(`阅读器启动失败：${error.message}`));

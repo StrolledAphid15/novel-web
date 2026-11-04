@@ -11,10 +11,10 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;450;500;600;700&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="./styles.css" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
-    <script src="https://unpkg.com/epubjs@0.3.93/dist/epub.min.js" defer></script>
+    <!-- 外部字体不阻塞首屏：先以 media="print" 挂起，加载完成后再启用；连不上时直接使用系统字体。 -->
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;450;500;600;700&family=Noto+Serif+SC:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+    <link rel="stylesheet" href="./styles.css?v=1.8.0" />
+    <!-- EPUB 依赖（JSZip / epub.js）不再阻塞启动，只在打开 EPUB 时按需加载。 -->
   </head>
   <body>
     <div class="app-shell">
@@ -22,7 +22,7 @@
         <a class="brand" href="#" aria-label="页间首页"><span class="brand-mark">页</span><span>页间<span class="brand-dot">.</span></span></a>
         <div class="side-label">个人空间</div>
         <nav class="side-nav" aria-label="主导航">
-          <button class="nav-item active" data-view="library"><span class="nav-icon">▤</span>我的书架<span class="nav-count" id="book-count">1</span></button>
+          <button class="nav-item active" data-view="library"><span class="nav-icon">▤</span>我的书架<span class="nav-count" id="book-count">0</span></button>
           <button class="nav-item" data-view="cloud"><span class="nav-icon">☁</span>云端书库<span class="nav-count" id="cloud-book-count">0</span></button>
         </nav>
         <div class="sidebar-import"><button class="outline-button" id="add-book-side">＋ 导入书籍</button></div>
@@ -53,7 +53,7 @@
           <div class="reader-toolbar">
             <div class="reading-label"><span class="reading-indicator"></span><span id="reading-state">正在阅读</span></div>
             <div class="reader-tools">
-              <div class="chapter-tools"><button class="chapter-arrow" id="prev-chapter" aria-label="上一章" title="上一章">←</button><label class="select-wrap"><span class="sr-only">选择章节</span><select id="chapter-select" aria-label="选择章节"></select></label><button class="chapter-arrow" id="next-chapter" aria-label="下一章" title="下一章">→</button><span id="chapter-counter">01 / 03</span></div>
+              <div class="chapter-tools"><button class="chapter-arrow" id="prev-chapter" aria-label="上一章" title="上一章">←</button><label class="select-wrap"><span class="sr-only">选择章节</span><select id="chapter-select" aria-label="选择章节"></select></label><button class="chapter-arrow" id="next-chapter" aria-label="下一章" title="下一章">→</button><span id="chapter-counter"></span></div>
               <span class="tool-divider"></span>
               <button class="tool-button" id="font-down" aria-label="缩小字号" title="缩小字号">A−</button><span class="font-size-value" id="font-size-value">18</span><button class="tool-button" id="font-up" aria-label="放大字号" title="放大字号">A+</button>
               <span class="tool-divider"></span>
@@ -62,8 +62,9 @@
           </div>
 
           <div class="reader-scroll" id="reader-scroll">
+            <div class="reader-loading" id="reader-loading" hidden><span class="loading-ring"></span><span id="reader-loading-text">正在打开书籍…</span></div>
             <article class="reading-page" id="text-page">
-              <div class="book-kicker"><span class="kicker-line"></span><span id="book-author">未知作者</span></div>
+              <div class="book-kicker"><span class="kicker-line"></span><span id="book-author"></span></div>
               <h1 class="chapter-title" id="chapter-title"></h1>
               <div class="chapter-meta"><span id="chapter-subtitle"></span><span class="meta-dot">·</span><span id="chapter-reading-time"></span></div>
               <div class="prose" id="chapter-content"></div>
@@ -72,7 +73,7 @@
             <div class="epub-host" id="epub-host" hidden></div>
           </div>
 
-          <footer class="reader-footer"><div class="progress-track"><span class="progress-fill" id="progress-fill"></span></div><div class="progress-details"><span id="progress-chapter">第 1 章 · 雾起时分</span><span id="progress-percent">33%</span></div></footer>
+          <footer class="reader-footer"><div class="progress-track"><span class="progress-fill" id="progress-fill"></span></div><div class="progress-details"><span id="progress-chapter"></span><span id="progress-percent"></span></div></footer>
         </section>
       </main>
     </div>
@@ -89,7 +90,7 @@
         <section class="settings-section"><div class="settings-section-title">GitHub</div><p>书籍和两位读者的数据分别写入三个分支，减少不同数据更新之间的冲突。</p><label class="field-label" for="github-repository">私有仓库</label><input class="text-field" id="github-repository" placeholder="owner/novel-web-data" autocomplete="off" /><label class="field-label" for="github-branch">基准分支</label><input class="text-field" id="github-branch" value="main" autocomplete="off" /><div class="field-help">首次同步会从基准分支创建 sync-books、sync-reader-a 和 sync-reader-b，并继承已有数据。</div><label class="field-label" for="github-token">Fine-grained personal access token</label><input class="text-field" id="github-token" type="password" placeholder="github_pat_…" autocomplete="off" /><div class="settings-actions"><button class="primary-button" id="github-sync">连接并同步</button><span class="sync-feedback" id="sync-feedback">尚未连接</span></div><div class="field-help">为专用私有仓库创建 Fine-grained token，仅授予 Contents 读写权限。令牌保存在此浏览器并可被页面脚本读取；不要写入源码或提交到仓库。</div></section>
         <section class="settings-section final-section"><div class="settings-section-title">书籍导入</div><p>支持 TXT、Markdown 和 EPUB。导入的书籍只保存在当前设备，下一次同步后会出现在云端书库；其他设备需要点击云端书库中的书再下载。</p><button class="outline-button" id="import-books">导入书籍</button></section>
       </div>
-      <div class="dialog-footer"><span>页间 · 版本 1.7</span><button class="text-button" id="clear-library">移出本机书籍</button></div>
+      <div class="dialog-footer"><span>页间 · 版本 1.8</span><button class="text-button" id="clear-library">移出本机书籍</button></div>
     </dialog>
 
     <dialog class="settings-dialog edit-book-dialog" id="edit-book-dialog">
@@ -106,6 +107,6 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=1.7.6" defer></script>
+    <script src="./app.js?v=1.8.0" defer></script>
   </body>
 </html>
