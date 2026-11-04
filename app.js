@@ -19,6 +19,8 @@ const ACTIVE_READER_KEY = "yejian-active-reader";
 const CLOUD_CATALOG_KEY = "yejian-cloud-catalog-v1";
 const SYNC_LOCK_KEY = "yejian-github-sync-lock";
 const SYNC_LOCK_TTL = 30000;
+// 云端并发冲突连续重试的上限：超过就停下来报错，避免每 2 秒无限空转。
+const SYNC_CONFLICT_RETRIES = 4;
 const READER_DEFAULTS = [{ id: "reader-a", name: "纨絔" }, { id: "reader-b", name: "澪" }];
 const READING_FIELDS = ["progress", "scrollProgress", "cfi", "progressUpdatedAt", "lastOpenedAt"];
 // EPUB 依赖按需加载，避免启动时被 CDN 阻塞（手机网络下常常要等很久才能出正文）。
@@ -1322,6 +1324,19 @@ async function readGitHubFileSha(path, branch) {
   }
 }
 
+// 写入云端书籍正文：传给 GitHub 的 sha 取自清单，可能已经过期，
+// 这时会一直 422 冲突并把整个同步卡在无限重试里；冲突时先取当前 sha 再写一次。
+async function writeCloudBookFile(path, content, branch, fileSha) {
+  try {
+    return await writeGitHubJson(path, content, branch, fileSha || null);
+  } catch (error) {
+    if (!error.isConflict) throw error;
+    const freshSha = await readGitHubFileSha(path, branch).catch(() => null);
+    if (!freshSha || freshSha === fileSha) throw error;
+    return writeGitHubJson(path, content, branch, freshSha);
+  }
+}
+
 // 删除云端书籍正文：清单里记录的 sha 可能已过期（文件被重新上传过），
 // 这时先取一次当前 sha 再删；确实删不掉就当成孤儿文件，绝不让整个同步卡死。
 async function deleteCloudBookFile(id, branch, fileSha) {
@@ -1454,8 +1469,10 @@ async function syncToGitHub({ automatic = false } = {}) {
       tombstones.set(id, Math.max(tombstones.get(id) || 0, Date.now(), remoteUpdatedAt + 1));
     });
     // 旧演示书永久墓碑（只有固定 id 这一本，时间戳固定不变，清单不会反复产生新提交）：
-    // 删除云端正文与清单条目，也清掉两位读者在云端的记录，旧设备同步回来也会被再次删掉。
-    tombstones.set(DEMO_BOOK_ID, Math.max(tombstones.get(DEMO_BOOK_ID) || 0, DEMO_TOMBSTONE_AT));
+    // 云端还留着它的条目或已有墓碑时才需要继续断言，干净的云端不会凭空多一条删除标记。
+    if (remoteBooks.has(DEMO_BOOK_ID) || tombstones.has(DEMO_BOOK_ID)) {
+      tombstones.set(DEMO_BOOK_ID, Math.max(tombstones.get(DEMO_BOOK_ID) || 0, DEMO_TOMBSTONE_AT));
+    }
     const mergedBooks = new Map(remoteBooks);
     const nextLocalBooks = new Map(localBooks);
 
@@ -1475,7 +1492,7 @@ async function syncToGitHub({ automatic = false } = {}) {
         if (existing && await contentHash(existing.value) === localHash) {
           fileSha = existing.sha;
         } else {
-          const saved = await writeGitHubJson(path, cloudContent(local), branch, existing?.sha || null);
+          const saved = await writeCloudBookFile(path, cloudContent(local), branch, existing?.sha || null);
           fileSha = saved.content.sha;
         }
         const descriptor = bookDescriptor(local, localHash, fileSha);
@@ -1483,7 +1500,7 @@ async function syncToGitHub({ automatic = false } = {}) {
       } else if (remote.contentHash !== localHash) {
         const localContentAt = local.contentUpdatedAt || local.addedAt || local.updatedAt || 0;
         if (localContentAt >= (remote.contentUpdatedAt || 0)) {
-          const saved = await writeGitHubJson(path, cloudContent(local), branch, remote.fileSha);
+          const saved = await writeCloudBookFile(path, cloudContent(local), branch, remote.fileSha);
           fileSha = saved.content.sha;
           mergedBooks.set(id, bookDescriptor(local, localHash, fileSha));
         } else {
@@ -1579,20 +1596,20 @@ async function syncToGitHub({ automatic = false } = {}) {
   } catch (error) {
     if (runId !== syncRunId) return false;
     const isConflict = Boolean(error.isConflict);
-    const willRetry = isConflict;
+    manifestConflictRetries = isConflict ? manifestConflictRetries + 1 : 0;
+    // 偶发并发冲突值得立刻重新合并；但反复冲突说明卡在某个固定问题上，
+    // 这时必须停下来把原因显示出来，不能一直每 2 秒空转。
+    const willRetry = isConflict && manifestConflictRetries <= SYNC_CONFLICT_RETRIES;
     if (willRetry) {
-      manifestConflictRetries += 1;
       syncPending = true;
-    } else {
-      manifestConflictRetries = 0;
-    }
-    $("#sync-feedback").textContent = willRetry ? `检测到云端更新，2 秒后重新合并（第 ${manifestConflictRetries} 次）` : error.message;
-    if (willRetry) {
+      $("#sync-feedback").textContent = `检测到云端更新，2 秒后重新合并（第 ${manifestConflictRetries} 次）`;
       $("#local-status").textContent = "正在重新同步到 GitHub";
-    } else if (automatic) {
-      $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
     } else {
-      notify(error.message);
+      const reason = isConflict ? `与云端连续冲突 ${manifestConflictRetries} 次，已暂停重试，请稍后手动同步` : error.message;
+      $("#sync-feedback").textContent = reason;
+      if (isConflict) manifestConflictRetries = 0;
+      if (automatic) $("#local-status").textContent = "自动同步未完成，请在设置中手动连接";
+      else notify(reason);
     }
     lastSyncSucceeded = false;
     return false;

@@ -1,6 +1,6 @@
-const CACHE_NAME = "yejian-shell-v31";
+const CACHE_NAME = "yejian-shell-v32";
 // 体积大的阅读字体不进安装预缓存，改成首次阅读时按需缓存，避免手机上装 SW 时长时间等 5MB 字体。
-const APP_FILES = ["./", "./index.html", "./styles.css?v=1.8.2", "./app.js?v=1.8.2", "./manifest.webmanifest", "./icon.svg"];
+const APP_FILES = ["./", "./index.html", "./styles.css?v=1.8.3", "./app.js?v=1.8.3", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_FILES)));
