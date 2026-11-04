@@ -141,6 +141,21 @@ function emptyReader({ id, name }) {
   return { id, name, nameUpdatedAt: 0, settings: { fontSize: 18, theme: "paper" }, settingsUpdatedAt: 0, activeBookId: "", activeBookUpdatedAt: 0, books: {} };
 }
 
+// 本机存档可能被旧版本或异常中断写坏（缺 books/settings），
+// 那样 `readers[读者].books[书id]` 会抛异常，表现为点书没反应，所以读入时先补齐结构。
+function normalizeReader(stored, defaults) {
+  const base = emptyReader(defaults);
+  if (!stored || typeof stored !== "object") return base;
+  return {
+    ...base,
+    ...stored,
+    id: defaults.id,
+    name: typeof stored.name === "string" && stored.name.trim() ? stored.name : base.name,
+    settings: { ...base.settings, ...(stored.settings && typeof stored.settings === "object" ? stored.settings : {}) },
+    books: stored.books && typeof stored.books === "object" && !Array.isArray(stored.books) ? stored.books : {}
+  };
+}
+
 function saveReaders() {
   localStorage.setItem(READERS_KEY, JSON.stringify(readers));
 }
@@ -220,13 +235,16 @@ function migrateLegacyData(rows, settings, settingsUpdatedAt = 0, savedBookId = 
 
 function readingState(book, readerId = activeReaderId) {
   if (!book) return {};
-  const state = readers[readerId].books[book.id];
+  const state = readers[readerId]?.books?.[book.id];
   if (!state || (state.contentUpdatedAt || 0) < (book.contentUpdatedAt || book.addedAt || 0)) return {};
   return state;
 }
 
 function updateReadingState(book, changes) {
-  readers[activeReaderId].books[book.id] = { ...readingState(book), ...changes, contentUpdatedAt: book.contentUpdatedAt || book.addedAt || 0 };
+  const reader = readers[activeReaderId];
+  if (!reader || !book) return;
+  if (!reader.books || typeof reader.books !== "object") reader.books = {};
+  reader.books[book.id] = { ...readingState(book), ...changes, contentUpdatedAt: book.contentUpdatedAt || book.addedAt || 0 };
   saveReaders();
 }
 
@@ -362,7 +380,7 @@ function renderCollection() {
     const format = book.format === "epub" ? "EPUB" : book.title.match(/\.md$/i) ? "MD" : "TXT";
     return `<article class="collection-card"><button class="collection-open" data-book-id="${safeText(book.id)}" aria-label="阅读：${safeText(book.title)}"><span class="collection-cover"><span>${safeText(book.title.slice(0, 1))}</span><small>${format}</small></span><span class="collection-card-copy"><strong>${safeText(book.title)}</strong><span class="collection-author">${safeText(book.author || "未知作者")}</span><span class="collection-progress"><span><i style="width:${Math.min(100, percent)}%"></i></span><small>${percent}%</small></span></span></button><span class="collection-card-actions"><button class="text-button book-edit" data-book-id="${safeText(book.id)}">编辑</button><button class="text-button book-delete" data-book-id="${safeText(book.id)}">移出设备</button></span></article>`;
   }).join("");
-  $("#collection-grid").querySelectorAll(".collection-open").forEach((button) => button.addEventListener("click", () => selectBook(button.dataset.bookId)));
+  $("#collection-grid").querySelectorAll(".collection-open").forEach((button) => button.addEventListener("click", () => selectBook(button.dataset.bookId).catch((error) => notify(`打开失败：${error.message}`))));
   $("#collection-grid").querySelectorAll(".book-edit").forEach((button) => button.addEventListener("click", () => openBookEditor(button.dataset.bookId)));
   $("#collection-grid").querySelectorAll(".book-delete").forEach((button) => button.addEventListener("click", () => removeBook(button.dataset.bookId).catch((error) => notify(error.message))));
 }
@@ -384,7 +402,7 @@ function renderCloudCollection() {
     const action = local ? "已在本机" : "下载到本机";
     return `<article class="collection-card cloud-card"><button class="collection-open cloud-book-open" data-book-id="${safeText(book.id)}" aria-label="${local ? "打开" : "下载并打开"}：${safeText(book.title)}"><span class="collection-cover"><span>${safeText(book.title.slice(0, 1))}</span><small>${format}</small><span class="cloud-download-overlay" hidden><span class="download-ring"><span>0%</span></span></span></span><span class="collection-card-copy"><strong>${safeText(book.title)}</strong><span class="collection-author">${safeText(book.author || "未知作者")}</span><span class="cloud-book-status">${action}</span><span class="collection-progress"><span><i style="width:${Math.min(100, percent)}%"></i></span><small>${percent}%</small></span></span></button><span class="collection-card-actions"><button class="text-button cloud-book-delete" data-book-id="${safeText(book.id)}">删除云端</button></span></article>`;
   }).join("");
-  $("#cloud-collection-grid").querySelectorAll(".cloud-book-open").forEach((button) => button.addEventListener("click", () => downloadCloudBook(button.dataset.bookId).catch((error) => notify(error.message))));
+  $("#cloud-collection-grid").querySelectorAll(".cloud-book-open").forEach((button) => button.addEventListener("click", () => downloadCloudBook(button.dataset.bookId).catch((error) => notify(`打开失败：${error.message}`))));
   $("#cloud-collection-grid").querySelectorAll(".cloud-book-delete").forEach((button) => button.addEventListener("click", () => removeCloudBook(button.dataset.bookId).catch((error) => notify(error.message))));
 }
 
@@ -473,6 +491,8 @@ async function downloadCloudBook(id) {
     renderCollection();
     renderCloudCollection();
     notify(`《${descriptor.title}》已下载到本机`);
+    // 下载完直接打开：以前只下载不打开，云端书库里没读过的书点了像是“没反应”。
+    await selectBook(book.id, { persistCurrent: false });
   } finally {
     $("#local-status").textContent = "已连接 GitHub";
     renderCloudCollection();
@@ -689,12 +709,38 @@ function scheduleTextProgressSave() {
   }, 500);
 }
 
+function renderTextChapterEmpty(book) {
+  // 以前这里直接 return，读者页会停在空白（或上一本书的内容）且没有任何提示。
+  console.warn("这本书没有可显示的章节：", { id: book?.id, title: book?.title, format: book?.format, chapters: book?.chapters?.length });
+  setReaderLoading(false);
+  $("#text-page").hidden = false;
+  $("#epub-host").hidden = true;
+  $("#chapter-title").textContent = book?.title || "无法显示正文";
+  $("#chapter-subtitle").textContent = "";
+  $("#chapter-reading-time").textContent = "";
+  $("#chapter-counter").textContent = "";
+  $("#chapter-content").textContent = "这本书没有可显示的正文：文件可能是空的，或云端正文不完整。请在书架里重新导入原文件；如果是从云端下载的书，可以先「移出设备」再重新下载。";
+  $("#prev-chapter").disabled = true;
+  $("#next-chapter").disabled = true;
+  $("#chapter-select").replaceChildren();
+  chapterSelectKey = "";
+  $("#progress-chapter").textContent = book?.title || "";
+  $("#progress-percent").textContent = "";
+  $("#progress-fill").style.width = "0%";
+  $("#reading-state").textContent = "正文缺失";
+  $("#crumb-title").textContent = book?.title || "";
+  notify("这本书没有可显示的正文");
+}
+
 function renderTextChapter(index, save = true) {
   if (save) saveTextProgress(true);
   chapterGestureState.touchReadyChapter = chapterGestureState.touchScrollChapter = "";
   const book = activeBook();
   const chapters = currentChapters(book);
-  if (!chapters.length) return;
+  if (!chapters.length) {
+    renderTextChapterEmpty(book);
+    return;
+  }
   activeChapter = Math.max(0, Math.min(index, chapters.length - 1));
   const chapter = chapters[activeChapter];
   setReaderLoading(false);
@@ -786,10 +832,15 @@ function setFontSize(size, sync = true) {
 
 async function selectBook(id, { persistCurrent = true } = {}) {
   if (persistCurrent) await saveTextProgress(true);
+  const book = books.find((item) => item.id === id) || null;
+  if (!book) {
+    // 以前这里会落到 books[0] 或抛出异常，点书变成“没反应”。
+    notify("找不到这本书，请重新同步书架");
+    return;
+  }
   readingSession += 1;
   restoringTextPosition = false;
   activeBookId = id;
-  const book = activeBook();
   readers[activeReaderId].activeBookId = book.id;
   readers[activeReaderId].activeBookUpdatedAt = Date.now();
   updateReadingState(book, { lastOpenedAt: Date.now() });
@@ -1767,7 +1818,7 @@ async function init() {
   const savedReaders = localStorage.getItem(READERS_KEY);
   const stored = savedReaders ? JSON.parse(savedReaders) : {};
   loadCloudCatalog();
-  for (const defaults of READER_DEFAULTS) readers[defaults.id] = stored[defaults.id] || emptyReader(defaults);
+  for (const defaults of READER_DEFAULTS) readers[defaults.id] = normalizeReader(stored[defaults.id], defaults);
   // 先用本地的读者偏好把界面画出来，不等 IndexedDB 读完全部书籍（含 EPUB 正文）。
   applyReader();
   renderShelf();
