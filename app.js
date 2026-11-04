@@ -7,6 +7,10 @@ const GITHUB_MANIFEST_PATH = "sync/library-manifest.json";
 const GITHUB_BOOKS_BRANCH = "sync-books";
 const READER_BRANCHES = { "reader-a": "sync-reader-a", "reader-b": "sync-reader-b" };
 const DEMO_BOOK_ID = "sample-mist-port";
+const DEMO_BOOK_TITLE = "雾港来信";
+const DEMO_CHAPTER_TITLE = "雾起时分";
+// 固定的删除时间戳：墓碑稳定不变，云端清单不会因为反复同步而不断产生新提交。
+const DEMO_TOMBSTONE_AT = 4102444800000;
 const DELETED_BOOKS_KEY = "yejian-deleted-books";
 const SETTINGS_UPDATED_KEY = "yejian-settings-updated-at";
 const ACTIVE_BOOK_KEY = "yejian-active-book-id";
@@ -57,6 +61,8 @@ let syncRunId = 0;
 let syncLockTimer = null;
 let lastSyncSucceeded = null;
 const syncOwner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+// 旧演示书（《雾港来信》/第一章“雾起时分”）的 id 集合，本地与云端都要清干净。
+const legacyDemoIds = new Set([DEMO_BOOK_ID]);
 
 function loadScript(url) {
   return new Promise((resolve, reject) => {
@@ -154,6 +160,20 @@ function loadCloudCatalog() {
 
 function cloudDescriptor(id) {
   return cloudCatalog.books.find((book) => book.id === id) || null;
+}
+
+// 旧演示书判定：id 命中，或书名与章节内容都命中（防止被重新导入成新的 id 后残留）。
+function isLegacyDemoBook(book) {
+  if (!book) return false;
+  if (legacyDemoIds.has(book.id)) return true;
+  if (String(book.title || "").trim() !== DEMO_BOOK_TITLE) return false;
+  return normalizeTextChapters(book.chapters).some((chapter) => chapter.title.includes(DEMO_CHAPTER_TITLE));
+}
+
+function isLegacyDemoDescriptor(descriptor) {
+  if (!descriptor) return false;
+  if (legacyDemoIds.has(descriptor.id)) return true;
+  return descriptor.format === "text" && String(descriptor.title || "").trim() === DEMO_BOOK_TITLE;
 }
 
 function isLocalBook(id) {
@@ -410,6 +430,7 @@ async function downloadCloudBook(id) {
   await ensureGitHubBranch(branch, localStorage.getItem(GITHUB_BRANCH_KEY) || "main");
   let descriptor = cloudDescriptor(id);
   if (!descriptor) throw new Error("云端书籍目录中没有这本书");
+  if (isLegacyDemoDescriptor(descriptor)) throw new Error("这本旧演示书已被清理，请重新同步书架");
   if (isLocalBook(id)) {
     await selectBook(id);
     return;
@@ -1403,6 +1424,9 @@ async function syncToGitHub({ automatic = false } = {}) {
       const remoteUpdatedAt = remote?.updatedAt || remote?.addedAt || 0;
       tombstones.set(id, Math.max(tombstones.get(id) || 0, Date.now(), remoteUpdatedAt + 1));
     });
+    // 旧演示书永久墓碑：删除云端正文与清单条目，也顺带清掉两位读者在云端的记录，
+    // 这样即使某台设备还留着旧数据，同步回来也会被再次删掉。
+    for (const id of legacyDemoIds) tombstones.set(id, Math.max(tombstones.get(id) || 0, DEMO_TOMBSTONE_AT));
     const mergedBooks = new Map(remoteBooks);
     const nextLocalBooks = new Map(localBooks);
 
@@ -1634,15 +1658,25 @@ function bindEvents() {
 
 async function loadLibrary() {
   books = await allBooks();
-  const hadDemoBook = books.some((book) => book.id === DEMO_BOOK_ID);
-  if (hadDemoBook) books = books.filter((book) => book.id !== DEMO_BOOK_ID);
   const savedReaders = localStorage.getItem(READERS_KEY);
-  const hadDemoReaderData = Object.values(readers).some((reader) => Object.hasOwn(reader.books, DEMO_BOOK_ID) || reader.activeBookId === DEMO_BOOK_ID);
+  // 清掉旧演示书：本地正文、两位读者的记录、本机缓存的云端目录都要清，
+  // 否则它会一直停在“云端书库”里，点开又下载回来。
+  const demoBooks = books.filter(isLegacyDemoBook);
+  demoBooks.forEach((book) => legacyDemoIds.add(book.id));
+  const hadDemoBook = demoBooks.length > 0;
+  if (hadDemoBook) books = books.filter((book) => !isLegacyDemoBook(book));
+  const hadDemoReaderData = Object.values(readers).some((reader) => [...legacyDemoIds].some((id) => Object.hasOwn(reader.books, id)) || legacyDemoIds.has(reader.activeBookId));
   for (const reader of Object.values(readers)) {
-    delete reader.books[DEMO_BOOK_ID];
-    if (reader.activeBookId === DEMO_BOOK_ID) reader.activeBookId = "";
+    for (const id of legacyDemoIds) delete reader.books[id];
+    if (legacyDemoIds.has(reader.activeBookId)) reader.activeBookId = "";
   }
   if (hadDemoReaderData) saveReaders();
+  const demoDescriptors = cloudCatalog.books.filter(isLegacyDemoDescriptor);
+  if (demoDescriptors.length) {
+    demoDescriptors.forEach((book) => legacyDemoIds.add(book.id));
+    cloudCatalog = { ...cloudCatalog, books: cloudCatalog.books.filter((book) => !isLegacyDemoDescriptor(book)) };
+    saveCloudCatalog();
+  }
   // 只有真的需要迁移或清理时才整体重写数据库；否则每次启动都重写会让手机端等很久。
   const needsRewrite = hadDemoBook || books.some((book) => READING_FIELDS.some((key) => Object.hasOwn(book, key)));
   books = migrateLegacyData(books, savedReaders ? null : { fontSize: localStorage.getItem("yejian-font-size"), theme: localStorage.getItem("yejian-theme") }, localStorage.getItem(SETTINGS_UPDATED_KEY), localStorage.getItem(ACTIVE_BOOK_KEY) || "");
@@ -1651,6 +1685,7 @@ async function loadLibrary() {
   applyReader();
   renderShelf();
   renderCollection();
+  if (hadDemoBook || demoDescriptors.length) notify("已清理遗留的测试书《雾港来信》");
 }
 
 // 启动时的自动同步会读取/哈希全部书籍，很占手机端主线程，放到首屏之后空闲时再做。
