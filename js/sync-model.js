@@ -1,5 +1,5 @@
 window.YeJian.syncModel = (() => {
-  const { emptyReader, mergeReader, bookDescriptor, bookMetadata, mergeDescriptor, isCloudContent, READER_DEFAULTS } = window.YeJian.model;
+  const { emptyReader, mergeReader, bookDescriptor, bookMetadata, mergeDescriptor, isCloudContent, READER_DEFAULTS, DEMO_BOOK_ID, DEMO_TOMBSTONE_AT } = window.YeJian.model;
 
   function mergeTombstones(manifest, localDeleted, now) {
     const remoteBooks = new Map((manifest?.books || []).map((book) => [book.id, book]));
@@ -8,6 +8,7 @@ window.YeJian.syncModel = (() => {
       const remote = remoteBooks.get(id);
       deleted.set(id, Math.max(deleted.get(id) || 0, now, (remote?.updatedAt || remote?.addedAt || 0) + 1));
     }
+    if (remoteBooks.has(DEMO_BOOK_ID) || deleted.has(DEMO_BOOK_ID)) deleted.set(DEMO_BOOK_ID, Math.max(deleted.get(DEMO_BOOK_ID) || 0, DEMO_TOMBSTONE_AT));
     return deleted;
   }
 

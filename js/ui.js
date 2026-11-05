@@ -28,6 +28,13 @@ window.YeJian.createUi = function ({ state, storage, profiles }) {
   }
 
   function renderCollection() {
+    if (state.libraryLoaded === false) {
+      $("#collection-count").textContent = "正在载入本地书架…";
+      $("#collection-grid").hidden = true;
+      $("#collection-grid").innerHTML = "";
+      $("#collection-empty").hidden = true;
+      return;
+    }
     const query = $("#collection-search").value.trim().toLocaleLowerCase();
     const visibleBooks = [...state.books]
       .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))

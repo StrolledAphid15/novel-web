@@ -4,6 +4,7 @@ window.YeJian.createTextReader = function ({ state, profiles, view }) {
   let activeChapter = 0;
   let readingSession = 0;
   let restoringTextPosition = false;
+  let chapterSelectBook = null;
 
   function saveProgress({ defer = false } = {}) {
     const book = currentBook;
@@ -27,7 +28,21 @@ window.YeJian.createTextReader = function ({ state, profiles, view }) {
     if (save) saveProgress();
     const book = currentBook;
     const chapters = book?.chapters || [];
-    if (!chapters.length) return;
+    if (!chapters.length) {
+      $("#text-page").hidden = false;
+      $("#epub-host").hidden = true;
+      $("#chapter-title").textContent = book?.title || "无法显示正文";
+      $("#chapter-subtitle").textContent = $("#chapter-reading-time").textContent = $("#chapter-counter").textContent = "";
+      $("#chapter-content").textContent = "这本书没有可显示的正文，请重新导入原文件；从云端下载的书可以先移出设备再重新下载。";
+      $("#prev-chapter").disabled = $("#next-chapter").disabled = true;
+      $("#chapter-select").replaceChildren();
+      $("#progress-fill").style.width = "0%";
+      $("#progress-percent").textContent = "";
+      $("#progress-chapter").textContent = $("#crumb-title").textContent = book?.title || "";
+      $("#reading-state").textContent = "正文缺失";
+      view.notify("这本书没有可显示的正文");
+      return;
+    }
     activeChapter = Math.max(0, Math.min(index, chapters.length - 1));
     const chapter = chapters[activeChapter];
     $("#text-page").hidden = false;
@@ -38,7 +53,11 @@ window.YeJian.createTextReader = function ({ state, profiles, view }) {
     $("#chapter-content").innerHTML = chapter.paragraphs.map((line) => `<p>${view.safeText(line)}</p>`).join("");
     $("#chapter-reading-time").textContent = `约 ${Math.max(1, Math.ceil(chapter.paragraphs.join("").length / 500))} 分钟`;
     $("#chapter-counter").textContent = `${String(activeChapter + 1).padStart(2, "0")} / ${String(chapters.length).padStart(2, "0")}`;
-    $("#chapter-select").innerHTML = chapters.map((item, i) => `<option value="${i}" ${i === activeChapter ? "selected" : ""}>${view.safeText(item.title)}</option>`).join("");
+    if (chapterSelectBook !== book) {
+      $("#chapter-select").innerHTML = chapters.map((item, i) => `<option value="${i}">${view.safeText(item.title)}</option>`).join("");
+      chapterSelectBook = book;
+    }
+    $("#chapter-select").value = String(activeChapter);
     $("#prev-chapter").disabled = activeChapter === 0;
     $("#next-chapter").disabled = activeChapter === chapters.length - 1;
     $("#progress-fill").style.width = `${((activeChapter + 1) / chapters.length) * 100}%`;
@@ -78,6 +97,7 @@ window.YeJian.createTextReader = function ({ state, profiles, view }) {
   function close() {
     readingSession += 1;
     currentBook = null;
+    chapterSelectBook = null;
     restoringTextPosition = false;
   }
 

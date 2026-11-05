@@ -1,5 +1,5 @@
 window.YeJian.createSync = function ({ state, storage, profiles, view, reading, onSelectBook }) {
-  const { cloudContent, isCloudContent, contentHash, bookContentHash, bookMetadata, GITHUB_MANIFEST_PATH, GITHUB_BOOKS_BRANCH, READER_BRANCHES, READER_DEFAULTS } = window.YeJian.model;
+  const { cloudContent, isCloudContent, isLegacyDemoBook, isLegacyDemoDescriptor, contentHash, bookContentHash, bookMetadata, GITHUB_MANIFEST_PATH, GITHUB_BOOKS_BRANCH, READER_BRANCHES, READER_DEFAULTS } = window.YeJian.model;
   const { mergeTombstones, planBookSync, planLibrarySync, mergeLibraryResults, mergeReaderState, readerChanged, planReaderCleanup, createManifest, manifestChanged, localChanges } = window.YeJian.syncModel;
   const activeBook = () => window.YeJian.model.activeBook(state);
   const cloudDescriptor = (id) => window.YeJian.model.cloudDescriptor(state, id);
@@ -7,6 +7,7 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
   const saveReaders = () => profiles.saveReaders();
   const saveCloudCatalog = () => storage.saveCloudCatalog(state.cloudCatalog);
   const SYNC_LOCK_TTL = 30000;
+  const SYNC_CONFLICT_RETRIES = 4;
   const syncOwner = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let syncInProgress = false;
   let syncPending = false;
@@ -54,6 +55,7 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
     await client.ensureGitHubBranch(branch, sourceBranch);
     let descriptor = cloudDescriptor(id);
     if (!descriptor) throw new Error("云端书籍目录中没有这本书");
+    if (isLegacyDemoDescriptor(descriptor)) throw new Error("这本遗留演示书已停用，请重新同步目录");
     if (isLocalBook(id)) {
       await onSelectBook(id);
       return;
@@ -66,6 +68,7 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
       if (manifestRead?.value && !freshDescriptor) throw new Error(`《${descriptor.title}》已从云端书库删除，请重新同步目录`);
       if (freshDescriptor) {
         descriptor = freshDescriptor;
+        if (isLegacyDemoDescriptor(descriptor)) throw new Error("这本遗留演示书已停用，请重新同步目录");
         state.cloudCatalog = { ...state.cloudCatalog, ...manifestRead.value };
         saveCloudCatalog();
         view.renderCloudCollection();
@@ -89,6 +92,7 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
         }
       }
       const book = { ...descriptor, ...contentRead.value, fileSha: contentRead.sha };
+      if (isLegacyDemoBook(book)) throw new Error("这本遗留演示书已停用，请重新同步目录");
       delete book.fileSha;
       await storage.saveBook(book);
       state.libraryRevision += 1;
@@ -97,6 +101,7 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
       view.renderCollection();
       view.renderCloudCollection();
       view.notify(`《${descriptor.title}》已下载到本机`);
+      await onSelectBook(id);
     } finally {
       view.setLocalStatus("已连接 GitHub");
       view.renderCloudCollection();
@@ -168,7 +173,7 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
       }
       steps.push(step);
       const { action, local, remote } = step;
-      if (action === "merge" || action === "delete") continue;
+      if (action === "merge" || action === "delete") { await new Promise((resolve) => setTimeout(resolve, 0)); continue; }
       const path = `sync/books/${local.id}.json`;
       let fileSha = remote?.fileSha || null;
       if (action === "download") {
@@ -183,10 +188,11 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
       if (existing && await contentHash(existing.value) === local.contentHash) fileSha = existing.sha;
       else {
         const book = await loadBody();
-        const saved = await client.writeGitHubJson(path, cloudContent(book), GITHUB_BOOKS_BRANCH, existing?.sha || fileSha);
+        const saved = await client.putCloudFile(path, cloudContent(book), GITHUB_BOOKS_BRANCH, action === "publish" ? existing?.sha || null : undefined);
         fileSha = saved.content.sha;
       }
       results.push({ id: local.id, fileSha });
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
     return { plan: { ...plan, steps }, results };
   }
@@ -230,7 +236,6 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
       if (cloudManifest && (cloudManifest.version || 1) < 3) {
         cloudManifest = { ...cloudManifest, books: profiles.migrateLegacyData(cloudManifest.books || [], cloudManifest.settings, cloudManifest.settingsUpdatedAt) };
       }
-      const remoteReader = await client.readGitHubJson(`sync/readers/${readerId}.json`, readerBranch);
       const revision = state.libraryRevision;
       const localDeleted = storage.loadDeletedBooks();
       const tombstones = mergeTombstones(cloudManifest, localDeleted, Date.now());
@@ -241,8 +246,9 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
       for (const remote of plan.remoteBooks) {
         if (!tombstones.has(remote.id)) continue;
         const id = remote.id;
-        if (remote?.fileSha) await client.deleteGitHubFile(`sync/books/${id}.json`, branch, remote.fileSha);
+        await client.deleteCloudFile(`sync/books/${id}.json`, branch);
       }
+      const remoteReader = await client.readGitHubJson(`sync/readers/${readerId}.json`, readerBranch);
       await syncReader(client, readerId, readerBranch, remoteReader, revision, removedIds);
       for (const { id } of READER_DEFAULTS) {
         if (id !== readerId) await removeDeletedReaderStates(client, id, removedIds);
@@ -258,8 +264,10 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
       view.renderReaders();
       const manifest = createManifest(syncedBooks, tombstones, cloudManifest?.updatedAt || 0);
       if (manifestChanged(manifest, cloudManifest)) {
+        const latestManifestSha = await client.readGitHubFileSha(GITHUB_MANIFEST_PATH, branch);
+        if ((latestManifestSha || null) !== (manifestRead?.sha || null)) { syncPending = true; return false; }
         manifest.updatedAt = Date.now();
-        await client.writeGitHubJson(GITHUB_MANIFEST_PATH, manifest, branch, manifestRead?.sha || null);
+        await client.writeGitHubJson(GITHUB_MANIFEST_PATH, manifest, branch, latestManifestSha);
       }
       state.cloudCatalog = { ...manifest, updatedAt: manifest.updatedAt || cloudManifest?.updatedAt || Date.now() };
       saveCloudCatalog();
@@ -298,21 +306,23 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
     } catch (error) {
       if (runId !== syncRunId) return false;
       const isConflict = Boolean(error.isConflict);
-      const willRetry = isConflict;
+      manifestConflictRetries = isConflict ? manifestConflictRetries + 1 : 0;
+      const willRetry = isConflict && manifestConflictRetries <= SYNC_CONFLICT_RETRIES;
       if (willRetry) {
-        manifestConflictRetries += 1;
         syncPending = true;
       } else {
-        manifestConflictRetries = 0;
+        syncPending = false;
       }
-      view.setSyncFeedback(willRetry ? `检测到云端更新，2 秒后重新合并（第 ${manifestConflictRetries} 次）` : error.message);
+      const reason = isConflict && !willRetry ? `与云端连续冲突 ${manifestConflictRetries} 次，已暂停重试，请稍后手动同步` : error.message;
+      view.setSyncFeedback(willRetry ? `检测到云端更新，2 秒后重新合并（第 ${manifestConflictRetries} 次）` : reason);
       if (willRetry) {
         view.setLocalStatus("正在重新同步到 GitHub");
       } else if (automatic) {
         view.setLocalStatus("自动同步未完成，请在设置中手动连接");
       } else {
-        view.notify(error.message);
+        view.notify(reason);
       }
+      if (!willRetry) manifestConflictRetries = 0;
       return false;
     } finally {
       if (runId === syncRunId) {

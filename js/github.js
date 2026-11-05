@@ -156,5 +156,44 @@ window.YeJian.createGithub = function ({ repository, token, storage }) {
     return response?.json();
   }
 
-  return { ensureGitHubBranch, readGitHubJson, writeGitHubJson, deleteGitHubFile };
+  async function readGitHubFileSha(path, branch) {
+    const response = await githubRequest(path, branch, { allowMissing: true });
+    if (!response) return null;
+    const file = await response.json();
+    return typeof file?.sha === "string" ? file.sha : null;
+  }
+
+  async function putCloudFile(path, value, branch, knownSha) {
+    const sha = knownSha === undefined ? await readGitHubFileSha(path, branch) : knownSha;
+    try {
+      return await writeGitHubJson(path, value, branch, sha);
+    } catch (error) {
+      if (!error.isConflict) throw error;
+      const freshSha = await readGitHubFileSha(path, branch);
+      if (freshSha === sha) throw error;
+      return writeGitHubJson(path, value, branch, freshSha);
+    }
+  }
+
+  async function deleteCloudFile(path, branch) {
+    const sha = await readGitHubFileSha(path, branch);
+    if (!sha) return false;
+    try {
+      await deleteGitHubFile(path, branch, sha);
+      return true;
+    } catch (error) {
+      if (!error.isConflict) throw error;
+      const freshSha = await readGitHubFileSha(path, branch);
+      if (!freshSha || freshSha === sha) return false;
+      try {
+        await deleteGitHubFile(path, branch, freshSha);
+        return true;
+      } catch (retryError) {
+        if (!retryError.isConflict) throw retryError;
+        return false;
+      }
+    }
+  }
+
+  return { ensureGitHubBranch, readGitHubJson, writeGitHubJson, deleteGitHubFile, readGitHubFileSha, putCloudFile, deleteCloudFile };
 };

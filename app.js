@@ -1,13 +1,13 @@
 (() => {
   const storage = window.YeJian.createStorage();
-  const state = { books: [], cloudCatalog: { version: 3, updatedAt: 0, books: [], deleted: [] }, activeBookId: "", readers: {}, activeReaderId: storage.loadActiveReader(), fontSize: 18, activeTheme: "paper", libraryRevision: 0 };
+  const state = { books: [], cloudCatalog: { version: 3, updatedAt: 0, books: [], deleted: [] }, activeBookId: "", readers: {}, activeReaderId: storage.loadActiveReader(), fontSize: 18, activeTheme: "paper", libraryRevision: 0, libraryLoaded: false };
   const profiles = window.YeJian.createProfiles({ state, storage });
   const view = window.YeJian.createUi({ state, storage, profiles });
   const reading = window.YeJian.createReader({ state, storage, profiles, view });
   const library = window.YeJian.createLibrary({ state, storage, profiles, view, reading, onReaderChanged: applyReader });
   const sync = window.YeJian.createSync({ state, storage, profiles, view, reading, onSelectBook: library.selectBook });
   let switchingReader = false;
-  const { emptyReader, DEMO_BOOK_ID, READER_DEFAULTS, READING_FIELDS } = window.YeJian.model;
+  const { normalizeReader, isLegacyDemoBook, isLegacyDemoDescriptor, DEMO_BOOK_ID, READER_DEFAULTS, READING_FIELDS } = window.YeJian.model;
   const saveReaders = () => profiles.saveReaders();
   const $ = (selector) => document.querySelector(selector);
 
@@ -98,25 +98,31 @@
     }));
   }
 
-  async function init() {
-    storage.clearLegacyCredentials();
-    if ("serviceWorker" in navigator && location.protocol !== "file:") {
-      navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service Worker 注册失败：", error));
-    }
+  async function loadLibrary() {
     state.books = await storage.allBooks();
-    const hadDemoBook = state.books.some((book) => book.id === DEMO_BOOK_ID);
-    if (hadDemoBook) await storage.deleteBook(DEMO_BOOK_ID);
-    state.books = state.books.filter((book) => book.id !== DEMO_BOOK_ID);
     const savedReaders = storage.loadReaders();
-    const stored = savedReaders || {};
-    state.cloudCatalog = storage.loadCloudCatalog();
-    for (const defaults of READER_DEFAULTS) state.readers[defaults.id] = stored[defaults.id] || emptyReader(defaults);
-    const hadDemoReaderData = Object.values(state.readers).some((reader) => Object.hasOwn(reader.books, DEMO_BOOK_ID) || reader.activeBookId === DEMO_BOOK_ID);
-    for (const reader of Object.values(state.readers)) {
-      delete reader.books[DEMO_BOOK_ID];
-      if (reader.activeBookId === DEMO_BOOK_ID) reader.activeBookId = "";
+    const cloudListedIds = new Set(state.cloudCatalog.books.map((book) => book.id));
+    const demoIds = new Set([DEMO_BOOK_ID]);
+    for (const book of state.books.filter(isLegacyDemoDescriptor)) {
+      if (book.id === DEMO_BOOK_ID || isLegacyDemoBook(await storage.getBook(book.id))) {
+        demoIds.add(book.id);
+        await storage.deleteBook(book.id);
+      }
     }
-    if (hadDemoBook || hadDemoReaderData) saveReaders();
+    for (const book of state.cloudCatalog.books.filter(isLegacyDemoDescriptor)) demoIds.add(book.id);
+    state.books = state.books.filter((book) => !demoIds.has(book.id));
+    const hadDemoReaderData = Object.values(state.readers).some((reader) => [...demoIds].some((id) => Object.hasOwn(reader.books, id)) || demoIds.has(reader.activeBookId));
+    for (const reader of Object.values(state.readers)) {
+      for (const id of demoIds) delete reader.books[id];
+      if (demoIds.has(reader.activeBookId)) reader.activeBookId = "";
+    }
+    if (hadDemoReaderData) saveReaders();
+    if (state.cloudCatalog.books.some((book) => demoIds.has(book.id))) {
+      state.cloudCatalog = { ...state.cloudCatalog, books: state.cloudCatalog.books.filter((book) => !demoIds.has(book.id)) };
+      storage.saveCloudCatalog(state.cloudCatalog);
+    }
+    const extraCloudDeletes = [...demoIds].filter((id) => id !== DEMO_BOOK_ID && cloudListedIds.has(id));
+    if (extraCloudDeletes.length) storage.saveDeletedBooks([...new Set([...storage.loadDeletedBooks(), ...extraCloudDeletes])]);
     const legacyBooks = state.books.filter((book) => READING_FIELDS.some((key) => Object.hasOwn(book, key)));
     if (!savedReaders || legacyBooks.length) {
       const legacy = storage.loadLegacyPreferences();
@@ -128,12 +134,32 @@
     }
     applyReader();
     view.renderShelf();
+  }
+
+  async function init() {
+    storage.clearLegacyCredentials();
+    if ("serviceWorker" in navigator && location.protocol !== "file:") {
+      navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service Worker 注册失败：", error));
+    }
+    const stored = storage.loadReaders() || {};
+    state.cloudCatalog = storage.loadCloudCatalog();
+    for (const defaults of READER_DEFAULTS) state.readers[defaults.id] = normalizeReader(stored[defaults.id], defaults);
+    applyReader();
+    view.renderShelf();
     reading.setTheme(state.activeTheme, false);
     reading.setFontSize(state.fontSize, false);
     bindEvents();
     view.setView("library");
     $("#crumb-title").textContent = "共用书库";
-    sync.run({ automatic: true }).catch((error) => { $("#sync-feedback").textContent = error.message; });
+    try { await loadLibrary(); }
+    catch (error) { view.notify(`书架读取失败：${error.message}`); }
+    state.libraryLoaded = true;
+    view.renderCollection();
+    if (storage.loadGitHubConfig().token && storage.loadGitHubConfig().repository) {
+      const start = () => sync.run({ automatic: true }).catch((error) => { $("#sync-feedback").textContent = error.message; });
+      if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(start, { timeout: 3000 });
+      else setTimeout(start, 1500);
+    }
   }
 
   init().catch((error) => view.notify(`阅读器启动失败：${error.message}`));

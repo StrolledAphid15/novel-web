@@ -6,7 +6,7 @@ window.YeJian.createLibrary = function ({ state, storage, profiles, view, readin
   async function selectBook(id, { persistCurrent = true } = {}) {
     if (persistCurrent) await reading.saveProgress();
     const book = state.books.find((item) => item.id === id);
-    if (!book) return;
+    if (!book) { view.notify("找不到这本书，请重新同步书架"); return; }
     state.activeBookId = id;
     state.readers[state.activeReaderId].activeBookId = book.id;
     state.readers[state.activeReaderId].activeBookUpdatedAt = Date.now();

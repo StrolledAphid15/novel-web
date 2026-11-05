@@ -132,8 +132,12 @@ window.YeJian.createStorage = function () {
   const replaceBooks = (rows) => writeBooks(rows, [], true);
 
   function loadReaders() {
-    const saved = localStorage.getItem(READERS_KEY);
-    return saved ? JSON.parse(saved) : null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(READERS_KEY) || "null");
+      return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : null;
+    } catch {
+      return null;
+    }
   }
 
   function saveReaders(readers) {

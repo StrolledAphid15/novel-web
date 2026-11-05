@@ -172,6 +172,8 @@ window.YeJian.createReader = function ({ state, storage, profiles, view }) {
     book = isCloudContent(book) ? book : await storage.getBook(book.id);
     if (session !== readingSession) return;
     if (!book) throw new Error("这本书已不在本机，请重新下载或导入");
+    $("#reader-loading").hidden = book.format !== "epub";
+    $("#reading-state").textContent = book.format === "epub" ? "正在打开" : "正在阅读";
     currentBook = book;
     activeAdapter = book.format === "epub" ? epubReader : textReader;
     await activeAdapter.open(book);

@@ -3,11 +3,31 @@ window.YeJian = { model: (() => {
   const GITHUB_BOOKS_BRANCH = "sync-books";
   const READER_BRANCHES = { "reader-a": "sync-reader-a", "reader-b": "sync-reader-b" };
   const DEMO_BOOK_ID = "sample-mist-port";
+  const DEMO_TOMBSTONE_AT = 4102444800000;
   const READER_DEFAULTS = [{ id: "reader-a", name: "纨絔" }, { id: "reader-b", name: "澪" }];
   const READING_FIELDS = ["progress", "scrollProgress", "cfi", "progressUpdatedAt", "lastOpenedAt"];
 
   function emptyReader({ id, name }) {
     return { id, name, nameUpdatedAt: 0, settings: { fontSize: 18, theme: "paper" }, settingsUpdatedAt: 0, activeBookId: "", activeBookUpdatedAt: 0, books: {} };
+  }
+
+  function normalizeReader(stored, defaults) {
+    const base = emptyReader(defaults);
+    if (!stored || typeof stored !== "object") return base;
+    return {
+      ...base, ...stored, id: defaults.id,
+      name: typeof stored.name === "string" && stored.name.trim() ? stored.name : base.name,
+      settings: { ...base.settings, ...(stored.settings && typeof stored.settings === "object" ? stored.settings : {}) },
+      books: stored.books && typeof stored.books === "object" && !Array.isArray(stored.books) ? stored.books : {}
+    };
+  }
+
+  function isLegacyDemoBook(book) {
+    return book?.id === DEMO_BOOK_ID || (String(book?.title || "").trim() === "雾港来信" && normalizeTextChapters(book.chapters).some((chapter) => chapter.title.includes("雾起时分")));
+  }
+
+  function isLegacyDemoDescriptor(book) {
+    return book?.id === DEMO_BOOK_ID || (book?.format === "text" && String(book.title || "").trim() === "雾港来信");
   }
 
   function mergeReader(local, remote) {
@@ -150,8 +170,8 @@ window.YeJian = { model: (() => {
 
   function mergeDescriptor(local, remote) {
     const metadata = (remote.metadataUpdatedAt || 0) > (local.metadataUpdatedAt || 0) ? remote : local;
-    return { ...local, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || local.updatedAt || 0, remote.addedAt || remote.updatedAt || 0), metadataUpdatedAt: metadata.metadataUpdatedAt };
+    return { ...local, fileSha: local.fileSha || remote.fileSha || null, title: metadata.title, author: metadata.author, addedAt: Math.min(local.addedAt || local.updatedAt || 0, remote.addedAt || remote.updatedAt || 0), metadataUpdatedAt: metadata.metadataUpdatedAt };
   }
 
-  return { GITHUB_MANIFEST_PATH, GITHUB_BOOKS_BRANCH, READER_BRANCHES, DEMO_BOOK_ID, READER_DEFAULTS, READING_FIELDS, emptyReader, mergeReader, activeBook, cloudDescriptor, isLocalBook, bookMetadata, normalizeTextChapters, flattenToc, decodeTextFile, splitIntoChapters, encodeBackup, decodeBackup, cloudContent, isCloudContent, contentHash, bookContentHash, bookDescriptor, mergeDescriptor };
+  return { GITHUB_MANIFEST_PATH, GITHUB_BOOKS_BRANCH, READER_BRANCHES, DEMO_BOOK_ID, DEMO_TOMBSTONE_AT, READER_DEFAULTS, READING_FIELDS, emptyReader, normalizeReader, isLegacyDemoBook, isLegacyDemoDescriptor, mergeReader, activeBook, cloudDescriptor, isLocalBook, bookMetadata, normalizeTextChapters, flattenToc, decodeTextFile, splitIntoChapters, encodeBackup, decodeBackup, cloudContent, isCloudContent, contentHash, bookContentHash, bookDescriptor, mergeDescriptor };
 })() };

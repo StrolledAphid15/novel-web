@@ -8,6 +8,25 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
   let readingSession = 0;
   let chapterNavigation = 0;
   let restoringPosition = false;
+  let librariesPromise = null;
+
+  function loadLibraries() {
+    if (window.JSZip && window.ePub) return Promise.resolve();
+    if (!librariesPromise) {
+      const urls = ["https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js", "https://unpkg.com/epubjs@0.3.93/dist/epub.min.js"];
+      librariesPromise = urls.reduce((promise, url) => promise.then(() => new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = url;
+        script.async = true;
+        script.addEventListener("load", resolve, { once: true });
+        script.addEventListener("error", () => { script.remove(); reject(new Error("EPUB 阅读组件加载失败，请检查网络后重试")); }, { once: true });
+        document.head.append(script);
+      })), Promise.resolve()).then(() => {
+        if (!window.JSZip || !window.ePub) throw new Error("EPUB 阅读组件未加载，请检查网络后刷新页面。");
+      }).catch((error) => { librariesPromise = null; throw error; });
+    }
+    return librariesPromise;
+  }
 
   const scrollContainers = () => [rendition?.manager?.container, $("#epub-host")];
 
@@ -31,6 +50,7 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
     readingSession += 1;
     chapterNavigation += 1;
     restoringPosition = false;
+    $("#reader-loading").hidden = true;
     rendition?.destroy();
     rendition = null;
     epubBook?.destroy();
@@ -47,8 +67,18 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
     $("#text-page").hidden = true;
     $("#epub-host").hidden = false;
     $("#epub-host").replaceChildren();
+    $("#chapter-title").textContent = book.title;
+    $("#book-author").textContent = book.author || "";
+    $("#chapter-subtitle").textContent = $("#chapter-reading-time").textContent = $("#chapter-counter").textContent = "";
+    $("#chapter-select").replaceChildren();
+    $("#progress-chapter").textContent = book.title;
+    $("#progress-percent").textContent = "";
+    $("#progress-fill").style.width = "0%";
+    $("#prev-chapter").disabled = $("#next-chapter").disabled = true;
+    $("#reader-loading-text").textContent = "正在打开 EPUB…";
+    $("#reader-loading").hidden = false;
     try {
-      if (!window.JSZip || !window.ePub) throw new Error("EPUB 阅读组件未加载，请检查网络后刷新页面。");
+      await loadLibraries();
       await new Promise(requestAnimationFrame);
       if (!isCurrent()) return;
       const currentBook = ePub(book.data);
@@ -57,12 +87,6 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
       await currentBook.ready;
       if (!isCurrent()) return;
       if (book.locations) currentBook.locations.load(book.locations);
-      else {
-        await currentBook.locations.generate(1000);
-        if (!isCurrent()) return;
-        book.locations = currentBook.locations.save();
-        await storage.saveBookLocations(book.id, book.locations, contentVersion);
-      }
       if (!isCurrent()) return;
       const [navigation, metadata] = await Promise.all([
         currentBook.loaded.navigation.catch(() => ({ toc: [] })),
@@ -104,16 +128,24 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
       });
       setFontSize(state.fontSize);
       setTheme(state.activeTheme);
+      const locationPercent = (cfi) => {
+        try {
+          if (!currentBook.locations.length()) return null;
+          const percent = currentBook.locations.percentageFromCfi(cfi);
+          return Number.isFinite(percent) ? Math.min(1, Math.max(0, percent)) : null;
+        } catch { return null; }
+      };
       const updateLocation = (location) => {
         if (!isCurrent() || $(".reader-stage").hidden) return;
         const href = (location.start.href || "").split("#")[0];
         const spineHref = spineItems[location.start.index]?.href;
         const chapter = chapters.find((item) => item.href.split("#")[0] === href) || chapters.find((item) => item.href.split("#")[0] === spineHref) || chapters[0];
         activeChapter = chapters.indexOf(chapter);
-        const percent = currentBook.locations.percentageFromCfi(location.start.cfi) || 0;
+        const exactPercent = locationPercent(location.start.cfi);
+        const percent = exactPercent ?? (spineItems.length ? Math.min(1, (Number(location.start.index) + 1) / spineItems.length) : 0);
         const progressState = profiles.readingState(book);
-        if (progressState.cfi !== location.start.cfi || progressState.progress !== percent) {
-          profiles.updateReadingState(book, { cfi: location.start.cfi, progress: percent, progressUpdatedAt: Date.now() }, { defer: true });
+        if (progressState.cfi !== location.start.cfi || (exactPercent != null && progressState.progress !== exactPercent)) {
+          profiles.updateReadingState(book, { cfi: location.start.cfi, progress: exactPercent ?? progressState.progress ?? 0, progressUpdatedAt: Date.now() }, { defer: true });
         }
         $("#chapter-title").textContent = chapter.label;
         $("#chapter-select").value = chapter.href;
@@ -133,13 +165,41 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
         }
       };
       currentRendition.on("relocated", updateLocation);
-      await currentRendition.display(profiles.readingState(book).cfi || chapters[0].href);
+      const generateLocations = async () => {
+        await currentBook.locations.generate(1000);
+        if (!isCurrent()) return;
+        book.locations = currentBook.locations.save();
+        await storage.saveBookLocations(book.id, book.locations, contentVersion);
+      };
+      const savedCfi = profiles.readingState(book).cfi;
+      if (savedCfi && !book.locations) {
+        $("#reader-loading-text").textContent = "正在恢复阅读位置…";
+        try { await generateLocations(); }
+        catch (error) { console.warn("生成 EPUB 位置索引失败：", error); }
+        if (!isCurrent()) return;
+      }
+      try {
+        await currentRendition.display(savedCfi || chapters[0].href);
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (!savedCfi) throw error;
+        await currentRendition.display(chapters[0].href);
+      }
       if (!isCurrent()) return;
+      $("#reader-loading").hidden = true;
+      $("#reading-state").textContent = "正在阅读";
       const current = currentRendition.currentLocation();
       if (current?.start) updateLocation(current);
       $("#crumb-title").textContent = book.title;
       $("#reader-scroll").scrollTop = 0;
       restoringPosition = false;
+      if (!book.locations) {
+        generateLocations().then(() => {
+          if (!isCurrent()) return;
+          const location = currentRendition.currentLocation();
+          if (location?.start) updateLocation(location);
+        }).catch((error) => console.warn("生成 EPUB 位置索引失败：", error));
+      }
     } catch (error) {
       if (!isCurrent()) return;
       close();
@@ -148,6 +208,7 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
       $("#chapter-title").textContent = "无法打开这本 EPUB";
       $("#chapter-content").textContent = error.message;
       $("#chapter-select").replaceChildren();
+      $("#reading-state").textContent = "打开失败";
       view.notify(error.message);
     }
   }

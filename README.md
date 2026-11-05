@@ -8,13 +8,15 @@ python -m http.server 8000
 
 然后访问 <http://localhost:8000>。
 
-支持 TXT、Markdown、EPUB 导入，浏览器本地保存书籍和阅读位置；提供章节导航、字号、三种阅读主题，以及 JSON 备份导入导出。EPUB 渲染使用开源 [epub.js](https://github.com/futurepress/epub.js) 和 [JSZip](https://github.com/Stuk/jszip)，运行时从公共 CDN 加载；字体使用 Google Fonts，离线时回退到系统字体。
+支持 TXT、Markdown、EPUB 导入，浏览器本地保存书籍和阅读位置；提供章节导航、字号、三种阅读主题，以及 JSON 备份导入导出。EPUB 渲染使用开源 [epub.js](https://github.com/futurepress/epub.js) 和 [JSZip](https://github.com/Stuk/jszip)，只在首次打开 EPUB 时从公共 CDN 按需加载，不会拖慢启动；阅读界面字体使用本地文件，界面字体来自 Google Fonts，连不上时回退到系统字体且不阻塞首屏。
 
 触屏阅读时，上滑到章末后，松手再上滑一次进入下一章开头；下滑到章首后，松手再下滑一次回到上一章底部。短章节或打开时已在边界，也需先滑一次，再滑第二次切章。滚轮阅读时，滚到边界后停止滚动，再向对应方向滚动一次即可切章。正文文字和阅读区空白处均可操作，支持 TXT、Markdown 和 EPUB，并保存切章后的阅读位置；第一章不能继续后退，最后一章不能继续前进，同一次滚动或滑动到达边界时不会立即切章。
 
 ## 安装为应用
 
 网站通过 HTTPS 访问时，可在 Microsoft Edge 打开后，从浏览器菜单选择“应用”→“将此站点安装为应用”，或使用地址栏中的安装图标。安装后会以独立窗口运行；书架和书籍保存在浏览器本地。离线时会缓存阅读器页面，但 GitHub 同步及通过 CDN 加载的 EPUB 组件需要联网。
+
+首次打开一本 EPUB 时会先显示正文，再在后台建立全书位置索引，因此进度百分比可能先按章节估算、随后自动校正；索引生成后会被缓存，再次打开无需重建。
 
 ## GitHub 同步
 
