@@ -172,12 +172,8 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
         await storage.saveBookLocations(book.id, book.locations, contentVersion);
       };
       const savedCfi = profiles.readingState(book).cfi;
-      if (savedCfi && !book.locations) {
-        $("#reader-loading-text").textContent = "正在恢复阅读位置…";
-        try { await generateLocations(); }
-        catch (error) { console.warn("生成 EPUB 位置索引失败：", error); }
-        if (!isCurrent()) return;
-      }
+      if (savedCfi) $("#reader-loading-text").textContent = "正在恢复阅读位置…";
+      // CFI targets work without the full-book percentage index.
       try {
         await currentRendition.display(savedCfi || chapters[0].href);
       } catch (error) {
@@ -228,7 +224,19 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
         // Wait for the chapter's font and iframe layout before measuring its bottom.
         await new Promise(requestAnimationFrame);
         if (!isCurrent()) return;
-        await Promise.all(currentRendition.getContents().map((contents) => contents.document.fonts?.ready));
+        let fontTimeout;
+        try {
+          // A stalled font request must not keep chapter gestures locked.
+          await Promise.race([
+            Promise.all(currentRendition.getContents().map((contents) => contents.document.fonts?.ready)),
+            new Promise((resolve) => { fontTimeout = setTimeout(resolve, 1500); })
+          ]);
+        } finally {
+          clearTimeout(fontTimeout);
+        }
+        if (!isCurrent()) return;
+        // epub.js observes font reflow asynchronously; update the iframe before scrolling.
+        currentRendition.getContents().forEach((contents) => contents.resizeCheck());
         await new Promise(requestAnimationFrame);
         if (!isCurrent()) return;
         [...scrollContainers(), $("#reader-scroll")].filter(Boolean).forEach((scroller) => {

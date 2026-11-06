@@ -1,8 +1,8 @@
-const CACHE_NAME = "yejian-shell-v35";
+const CACHE_NAME = "yejian-shell-v36";
 const APP_FILES = [
   "./", "./index.html", "./styles.css?v=1.10.2", "./app.js?v=1.10.2",
   "./js/model.js?v=1.10.2", "./js/storage.js?v=1.10.2", "./js/profiles.js?v=1.10.2",
-  "./js/reader-text.js?v=1.10.2", "./js/reader-epub.js?v=1.10.2",
+  "./js/reader-text.js?v=1.10.2", "./js/reader-epub.js?v=1.10.3",
   "./js/sync-model.js?v=1.10.2", "./js/ui.js?v=1.10.2", "./js/reader.js?v=1.10.2", "./js/github.js?v=1.10.2",
   "./js/sync.js?v=1.10.2", "./js/library.js?v=1.10.2",
   "./manifest.webmanifest", "./icon.svg"
