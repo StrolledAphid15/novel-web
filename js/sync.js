@@ -48,6 +48,11 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
   }
 
   async function downloadCloudBook(id) {
+    if (isLocalBook(id)) {
+      await onSelectBook(id);
+      return;
+    }
+    if (navigator.onLine === false) throw new Error("这本书尚未下载到本机，请联网后下载");
     const { repository, token, sourceBranch } = storage.loadGitHubConfig();
     const client = window.YeJian.createGithub({ repository, token, storage });
     const branch = GITHUB_BOOKS_BRANCH;
@@ -56,10 +61,6 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
     let descriptor = cloudDescriptor(id);
     if (!descriptor) throw new Error("云端书籍目录中没有这本书");
     if (isLegacyDemoDescriptor(descriptor)) throw new Error("这本遗留演示书已停用，请重新同步目录");
-    if (isLocalBook(id)) {
-      await onSelectBook(id);
-      return;
-    }
     view.setLocalStatus(`正在下载《${descriptor.title}》`);
     view.setCloudDownloadProgress(id, 0);
     try {
@@ -210,6 +211,12 @@ window.YeJian.createSync = function ({ state, storage, profiles, view, reading, 
     }
     if (!/^[^/]+\/[^/]+$/.test(repository)) {
       if (!automatic) view.notify("仓库格式应为 owner/repository");
+      return false;
+    }
+    if (navigator.onLine === false) {
+      view.setSyncFeedback("当前离线，联网后可同步");
+      view.setLocalStatus("离线 · 可阅读本机书籍");
+      if (!automatic) view.notify("当前离线，可继续阅读本机书籍，联网后再同步");
       return false;
     }
     if (!acquireSyncLock()) {

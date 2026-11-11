@@ -13,16 +13,16 @@ window.YeJian.createEpubReader = function ({ state, storage, profiles, view, bin
   function loadLibraries() {
     if (window.JSZip && window.ePub) return Promise.resolve();
     if (!librariesPromise) {
-      const urls = ["https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js", "https://unpkg.com/epubjs@0.3.93/dist/epub.min.js"];
+      const urls = ["./vendor/jszip-3.10.1.min.js", "./vendor/epub-0.3.93.min.js"];
       librariesPromise = urls.reduce((promise, url) => promise.then(() => new Promise((resolve, reject) => {
         const script = document.createElement("script");
         script.src = url;
         script.async = true;
         script.addEventListener("load", resolve, { once: true });
-        script.addEventListener("error", () => { script.remove(); reject(new Error("EPUB 阅读组件加载失败，请检查网络后重试")); }, { once: true });
+        script.addEventListener("error", () => { script.remove(); reject(new Error("EPUB 阅读组件缺失，请联网刷新一次以完成离线缓存")); }, { once: true });
         document.head.append(script);
       })), Promise.resolve()).then(() => {
-        if (!window.JSZip || !window.ePub) throw new Error("EPUB 阅读组件未加载，请检查网络后刷新页面。");
+        if (!window.JSZip || !window.ePub) throw new Error("EPUB 阅读组件未正确加载，请刷新页面重试。");
       }).catch((error) => { librariesPromise = null; throw error; });
     }
     return librariesPromise;
